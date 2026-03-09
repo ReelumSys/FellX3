@@ -552,7 +552,7 @@ with st.sidebar:
     cif_file = cif_file2
     
     #cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
-                                help="Any standard CIF including ICSD, COD, CCDC exports")
+    #                            help="Any standard CIF including ICSD, COD, CCDC exports")
 
     st.divider()
     st.header("📈 Diffractogram")
