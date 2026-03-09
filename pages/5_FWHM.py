@@ -330,7 +330,7 @@ with st.sidebar:
 
     if data_source == "📁 Upload file":
         uploaded = cif_file2
-        col_sep = st.selectbox("Delimiter", ["auto", ",", ";", "\\t", "space"])
+        #col_sep = st.selectbox("Delimiter", ["auto", ",", ";", "\\t", "space"])
 
     else:
         mineral_sel = st.selectbox("Mineral", list(MINERALS.keys()))
