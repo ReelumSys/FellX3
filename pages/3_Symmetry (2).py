@@ -4,6 +4,7 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 import py3Dmol
 import tempfile
 import pandas as pd
+from main import cif_file2
 
 
 im = 'images/favicon.png'
@@ -52,7 +53,7 @@ def display_structure(structure, height=500, width=600):
     return mol
 
 
-uploaded_file = st.file_uploader("Upload CIF file", type=["cif"])
+uploaded_file = cif_file2
 
 if uploaded_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".cif") as tmp:
