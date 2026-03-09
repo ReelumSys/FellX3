@@ -53,6 +53,17 @@ if not name2:
   st.stop()
 st.success('Done.')
 
+cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
+                             help="Any standard CIF including ICSD, COD, CCDC exports")
+
+name3 = cif_file
+if not name3:
+  st.warning('Please input a .cif file.')
+
+  st.stop()
+st.success('Done.')
+
+
 df = pd.read_fwf(name)
 df.to_csv('First.csv', index=False)
 

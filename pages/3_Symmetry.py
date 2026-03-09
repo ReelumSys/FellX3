@@ -27,6 +27,7 @@ from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 import io, re, itertools, textwrap
+import main
 
 
 
@@ -547,7 +548,10 @@ st.markdown(
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("📐 Structure (CIF)")
-    cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
+    
+    cif_file = cif_file
+    
+    #cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
                                 help="Any standard CIF including ICSD, COD, CCDC exports")
 
     st.divider()
