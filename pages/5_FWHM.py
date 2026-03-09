@@ -328,11 +328,16 @@ with st.sidebar:
     data_source = st.radio("Data source", ["📁 Upload file", "🔬 Simulate mineral"])
 
     if data_source == "📁 Upload file":
+
+        uploaded = pd.read_csv('Second.csv', names=['Theta2','Int2'])
+
+        '''
         uploaded = st.file_uploader(
             "Upload diffractogram (CSV or XY)",
             type=["csv", "txt", "xy", "dat"],
             help="Two-column file: 2θ [°] , Intensity. Delimiter: comma, tab, or space."
-        )
+        )'''
+
         col_sep = st.selectbox("Delimiter", ["auto", ",", ";", "\\t", "space"])
 
     else:
