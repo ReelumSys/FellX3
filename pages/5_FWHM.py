@@ -329,7 +329,7 @@ with st.sidebar:
 
     if data_source == "📁 Upload file":
 
-        uploaded = pd.read_csv('Second.csv', names=['Theta2','Int2'])
+        uploaded = pd.read_csv('First.csv')
 
         '''
         uploaded = st.file_uploader(
