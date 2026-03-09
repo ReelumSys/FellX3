@@ -53,11 +53,11 @@ if not name2:
   st.stop()
 st.success('Done.')
 
-global cif_file
-cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
+global cif_file2
+cif_file2 = st.file_uploader("Upload CIF file", type=["cif","CIF"],
                              help="Any standard CIF including ICSD, COD, CCDC exports")
 
-name3 = cif_file
+name3 = cif_file2
 if not name3:
   st.warning('Please input a .cif file.')
 
