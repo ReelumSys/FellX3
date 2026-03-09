@@ -28,7 +28,7 @@ from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 import io, re, itertools, textwrap
 import main
-
+from main import cif_file2
 
 
 im = 'images/favicon.png'
@@ -549,7 +549,7 @@ st.markdown(
 with st.sidebar:
     st.header("📐 Structure (CIF)")
     
-    cif_file = cif_file
+    cif_file = cif_file2
     
     #cif_file = st.file_uploader("Upload CIF file", type=["cif","CIF"],
                                 help="Any standard CIF including ICSD, COD, CCDC exports")
