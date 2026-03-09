@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from main import cif_file2000
+from main import cif_file2
 
 # ══════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -595,7 +595,9 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    uploaded = st.file_uploader("Upload CIF file", type=["cif"],
+    uploaded = cif_file2
+
+    uploaded = st.file_uploader(cif_file2, type=["cif"],
                                  label_visibility="collapsed")
 
     st.markdown('<hr class="sect-divider">', unsafe_allow_html=True)

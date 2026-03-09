@@ -12,8 +12,8 @@ from PIL import Image
 #from PyCrystallography import unit_cell
 #from PyCrystallography import lattice
 import os
-
-import streamlit as st
+from pymatgen.core import Structure
+from ase.io import read, write
 
 st.set_page_config(
     page_title="Multipage App",
@@ -64,8 +64,10 @@ if not name3:
   st.stop()
 st.success('Done.')
 
+#name3.to(filename="cif_file2.cif") #pymatgen
 
-
+atoms = read(cif_file2)
+write("cif_file2.cif", atoms)
 
 df = pd.read_fwf(name)
 df.to_csv('First.csv', index=False)
