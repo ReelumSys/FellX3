@@ -27,8 +27,8 @@ from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 import io, re, itertools, textwrap
-import main
-from main import cif_file2
+#import main
+#from main import cif_file2
 
 
 im = 'images/favicon.png'
