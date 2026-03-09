@@ -329,14 +329,14 @@ with st.sidebar:
 
     if data_source == "📁 Upload file":
 
-        uploaded = pd.read_csv('First.csv')
+        #uploaded = pd.read_csv('First.csv')
 
-        '''
+        
         uploaded = st.file_uploader(
             "Upload diffractogram (CSV or XY)",
             type=["csv", "txt", "xy", "dat"],
             help="Two-column file: 2θ [°] , Intensity. Delimiter: comma, tab, or space."
-        )'''
+        )
 
         col_sep = st.selectbox("Delimiter", ["auto", ",", ";", "\\t", "space"])
 
