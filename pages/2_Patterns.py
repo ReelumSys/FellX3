@@ -14,7 +14,7 @@ from matplotlib import pyplot
 import os
 import altair as alt
 import streamlit as st
-
+from main import cif_file2
 
 im = 'images/favicon.png'
 st.set_page_config(

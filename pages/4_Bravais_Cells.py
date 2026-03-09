@@ -1,683 +1,788 @@
 ﻿"""
-Bravais Lattice Cell Visualizer for Minerals
-3D interactive visualization of all 14 Bravais lattice types,
-with mineral-specific unit cells and atom positions.
+╔══════════════════════════════════════════════════════╗
+║        BRAVAIS LATTICE VIEWER  ·  Streamlit App      ║
+║  Pure-Python CIF parser · Plotly 3-D · No gemmi req  ║
+╚══════════════════════════════════════════════════════╝
+
+Install:
+    pip install streamlit plotly numpy pandas
+
+Run:
+    streamlit run bravais_viewer.py
 """
 
-import streamlit as st
+import re, math, io
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
+from main import cif_file2000
 
-
-
-
-im = 'images/favicon.png'
+# ══════════════════════════════════════════════════════
+#  PAGE CONFIG
+# ══════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="FellX v0.8",
-    page_icon=im,
+    page_title="Bravais Lattice Viewer",
+    page_icon="🔷",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bravais lattice definitions (all 14)
-# centering: P=primitive, I=body, F=face, C=base, R=rhombohedral
-# ─────────────────────────────────────────────────────────────────────────────
-BRAVAIS_LATTICES = {
-    # Triclinic
-    "Triclinic P (aP)": {
-        "system": "Triclinic", "centering": "P",
-        "a": 1.0, "b": 1.3, "c": 1.6,
-        "alpha": 75, "beta": 85, "gamma": 95,
-        "color": "#e74c3c", "symbol": "aP",
-    },
-    # Monoclinic
-    "Monoclinic P (mP)": {
-        "system": "Monoclinic", "centering": "P",
-        "a": 1.0, "b": 1.4, "c": 1.2,
-        "alpha": 90, "beta": 105, "gamma": 90,
-        "color": "#e67e22", "symbol": "mP",
-    },
-    "Monoclinic C (mC)": {
-        "system": "Monoclinic", "centering": "C",
-        "a": 1.0, "b": 1.4, "c": 1.2,
-        "alpha": 90, "beta": 105, "gamma": 90,
-        "color": "#f39c12", "symbol": "mC",
-    },
-    # Orthorhombic
-    "Orthorhombic P (oP)": {
-        "system": "Orthorhombic", "centering": "P",
-        "a": 1.0, "b": 1.3, "c": 1.6,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#2ecc71", "symbol": "oP",
-    },
-    "Orthorhombic C (oC)": {
-        "system": "Orthorhombic", "centering": "C",
-        "a": 1.0, "b": 1.3, "c": 1.6,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#27ae60", "symbol": "oC",
-    },
-    "Orthorhombic I (oI)": {
-        "system": "Orthorhombic", "centering": "I",
-        "a": 1.0, "b": 1.3, "c": 1.6,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#1abc9c", "symbol": "oI",
-    },
-    "Orthorhombic F (oF)": {
-        "system": "Orthorhombic", "centering": "F",
-        "a": 1.0, "b": 1.3, "c": 1.6,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#16a085", "symbol": "oF",
-    },
-    # Tetragonal
-    "Tetragonal P (tP)": {
-        "system": "Tetragonal", "centering": "P",
-        "a": 1.0, "b": 1.0, "c": 1.5,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#3498db", "symbol": "tP",
-    },
-    "Tetragonal I (tI)": {
-        "system": "Tetragonal", "centering": "I",
-        "a": 1.0, "b": 1.0, "c": 1.5,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#2980b9", "symbol": "tI",
-    },
-    # Trigonal / Rhombohedral
-    "Rhombohedral R (hR)": {
-        "system": "Trigonal", "centering": "R",
-        "a": 1.0, "b": 1.0, "c": 1.0,
-        "alpha": 70, "beta": 70, "gamma": 70,
-        "color": "#9b59b6", "symbol": "hR",
-    },
-    # Hexagonal
-    "Hexagonal P (hP)": {
-        "system": "Hexagonal", "centering": "P",
-        "a": 1.0, "b": 1.0, "c": 1.6,
-        "alpha": 90, "beta": 90, "gamma": 120,
-        "color": "#8e44ad", "symbol": "hP",
-    },
-    # Cubic
-    "Cubic P (cP)": {
-        "system": "Cubic", "centering": "P",
-        "a": 1.0, "b": 1.0, "c": 1.0,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#c0392b", "symbol": "cP",
-    },
-    "Cubic I (cI)": {
-        "system": "Cubic", "centering": "I",
-        "a": 1.0, "b": 1.0, "c": 1.0,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#e74c3c", "symbol": "cI",
-    },
-    "Cubic F (cF)": {
-        "system": "Cubic", "centering": "F",
-        "a": 1.0, "b": 1.0, "c": 1.0,
-        "alpha": 90, "beta": 90, "gamma": 90,
-        "color": "#ec407a", "symbol": "cF",
-    },
+# ══════════════════════════════════════════════════════
+#  GLOBAL CSS  –  dark crystallography lab aesthetic
+# ══════════════════════════════════════════════════════
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600&display=swap');
+
+/* ── root ── */
+html, body, [data-testid="stApp"] {
+    background: #070b14 !important;
+    color: #c8d8f0 !important;
+    font-family: 'Exo 2', sans-serif !important;
+}
+[data-testid="stSidebar"] {
+    background: #0b1120 !important;
+    border-right: 1px solid #1e3a5f44;
+}
+[data-testid="stSidebarContent"] { padding: 1.2rem 1rem !important; }
+
+/* ── headings ── */
+h1 { font-family: 'Rajdhani', sans-serif !important; font-weight: 700 !important;
+     letter-spacing: 2px !important; color: #7eb8f7 !important; }
+h2, h3 { font-family: 'Rajdhani', sans-serif !important; font-weight: 600 !important;
+          color: #9dceff !important; letter-spacing: 1px !important; }
+
+/* ── file uploader ── */
+[data-testid="stFileUploader"] {
+    border: 1px dashed #1e5a9f88 !important;
+    border-radius: 8px !important;
+    background: #0d1826 !important;
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mineral → Bravais lattice mapping + real unit cell parameters
-# ─────────────────────────────────────────────────────────────────────────────
-MINERALS = {
-    "Quartz (SiO₂)": {
-        "bravais": "Hexagonal P (hP)",
-        "a": 4.9133, "b": 4.9133, "c": 5.4053,
-        "alpha": 90.0, "beta": 90.0, "gamma": 120.0,
-        "space_group": "P3₂21  (No. 154)",
-        "atoms": [
-            {"element": "Si", "x": 0.4697, "y": 0.0000, "z": 0.0000, "color": "#4fc3f7", "r": 0.12},
-            {"element": "Si", "x": 0.0000, "y": 0.4697, "z": 0.6667, "color": "#4fc3f7", "r": 0.12},
-            {"element": "Si", "x": 0.5303, "y": 0.5303, "z": 0.3333, "color": "#4fc3f7", "r": 0.12},
-            {"element": "O",  "x": 0.4135, "y": 0.2669, "z": 0.1188, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.2669, "y": 0.4135, "z": 0.8812, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.7331, "y": 0.1466, "z": 0.4521, "color": "#ef5350", "r": 0.09},
-        ],
-    },
-    "Calcite (CaCO₃)": {
-        "bravais": "Rhombohedral R (hR)",
-        "a": 4.9896, "b": 4.9896, "c": 17.0610,
-        "alpha": 90.0, "beta": 90.0, "gamma": 120.0,
-        "space_group": "R3̄c  (No. 167)",
-        "atoms": [
-            {"element": "Ca", "x": 0.0000, "y": 0.0000, "z": 0.0000, "color": "#ab47bc", "r": 0.15},
-            {"element": "C",  "x": 0.0000, "y": 0.0000, "z": 0.2500, "color": "#78909c", "r": 0.08},
-            {"element": "O",  "x": 0.2573, "y": 0.0000, "z": 0.2500, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.0000, "y": 0.2573, "z": 0.2500, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.7427, "y": 0.7427, "z": 0.2500, "color": "#ef5350", "r": 0.09},
-        ],
-    },
-    "Forsterite (Mg₂SiO₄)": {
-        "bravais": "Orthorhombic F (oF)",
-        "a": 4.7540, "b": 10.1971, "c": 5.9806,
-        "alpha": 90.0, "beta": 90.0, "gamma": 90.0,
-        "space_group": "Pbnm  (No. 62)",
-        "atoms": [
-            {"element": "Mg", "x": 0.0000, "y": 0.0000, "z": 0.0000, "color": "#66bb6a", "r": 0.13},
-            {"element": "Mg", "x": 0.5000, "y": 0.5000, "z": 0.0000, "color": "#66bb6a", "r": 0.13},
-            {"element": "Mg", "x": 0.0000, "y": 0.2211, "z": 0.5000, "color": "#66bb6a", "r": 0.13},
-            {"element": "Mg", "x": 0.5000, "y": 0.7789, "z": 0.5000, "color": "#66bb6a", "r": 0.13},
-            {"element": "Si", "x": 0.0000, "y": 0.0940, "z": 0.4232, "color": "#4fc3f7", "r": 0.12},
-            {"element": "Si", "x": 0.5000, "y": 0.4060, "z": 0.4232, "color": "#4fc3f7", "r": 0.12},
-            {"element": "O",  "x": 0.0000, "y": 0.0926, "z": 0.7656, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.5000, "y": 0.4074, "z": 0.7656, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.0000, "y": 0.4512, "z": 0.2199, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.5000, "y": 0.0488, "z": 0.2199, "color": "#ef5350", "r": 0.09},
-        ],
-    },
-    "Albite (NaAlSi₃O₈)": {
-        "bravais": "Triclinic P (aP)",
-        "a": 8.1360, "b": 12.7870, "c": 7.1582,
-        "alpha": 94.253, "beta": 116.605, "gamma": 87.756,
-        "space_group": "P1̄  (No. 2)",
-        "atoms": [
-            {"element": "Na", "x": 0.2690, "y": 0.9890, "z": 0.1470, "color": "#ffca28", "r": 0.14},
-            {"element": "Al", "x": 0.0088, "y": 0.1680, "z": 0.2082, "color": "#ff8a65", "r": 0.11},
-            {"element": "Si", "x": 0.0036, "y": 0.8200, "z": 0.2390, "color": "#4fc3f7", "r": 0.12},
-            {"element": "Si", "x": 0.6900, "y": 0.1120, "z": 0.3150, "color": "#4fc3f7", "r": 0.12},
-            {"element": "Si", "x": 0.6813, "y": 0.8820, "z": 0.3610, "color": "#4fc3f7", "r": 0.12},
-            {"element": "O",  "x": 0.0055, "y": 0.1310, "z": 0.9680, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.5934, "y": 0.9970, "z": 0.2800, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.8194, "y": 0.1085, "z": 0.1902, "color": "#ef5350", "r": 0.09},
-            {"element": "O",  "x": 0.0203, "y": 0.3027, "z": 0.2700, "color": "#ef5350", "r": 0.09},
-        ],
-    },
-    "Halite (NaCl)": {
-        "bravais": "Cubic F (cF)",
-        "a": 5.6402, "b": 5.6402, "c": 5.6402,
-        "alpha": 90.0, "beta": 90.0, "gamma": 90.0,
-        "space_group": "Fm3̄m  (No. 225)",
-        "atoms": [
-            {"element": "Na", "x": 0.0, "y": 0.0, "z": 0.0, "color": "#ffca28", "r": 0.14},
-            {"element": "Na", "x": 0.5, "y": 0.5, "z": 0.0, "color": "#ffca28", "r": 0.14},
-            {"element": "Na", "x": 0.5, "y": 0.0, "z": 0.5, "color": "#ffca28", "r": 0.14},
-            {"element": "Na", "x": 0.0, "y": 0.5, "z": 0.5, "color": "#ffca28", "r": 0.14},
-            {"element": "Cl", "x": 0.5, "y": 0.0, "z": 0.0, "color": "#b0bec5", "r": 0.17},
-            {"element": "Cl", "x": 0.0, "y": 0.5, "z": 0.0, "color": "#b0bec5", "r": 0.17},
-            {"element": "Cl", "x": 0.0, "y": 0.0, "z": 0.5, "color": "#b0bec5", "r": 0.17},
-            {"element": "Cl", "x": 0.5, "y": 0.5, "z": 0.5, "color": "#b0bec5", "r": 0.17},
-        ],
-    },
-    "Pyrite (FeS₂)": {
-        "bravais": "Cubic P (cP)",
-        "a": 5.4166, "b": 5.4166, "c": 5.4166,
-        "alpha": 90.0, "beta": 90.0, "gamma": 90.0,
-        "space_group": "Pa3̄  (No. 205)",
-        "atoms": [
-            {"element": "Fe", "x": 0.0,   "y": 0.0,   "z": 0.0,   "color": "#ffd54f", "r": 0.13},
-            {"element": "Fe", "x": 0.5,   "y": 0.0,   "z": 0.5,   "color": "#ffd54f", "r": 0.13},
-            {"element": "Fe", "x": 0.0,   "y": 0.5,   "z": 0.5,   "color": "#ffd54f", "r": 0.13},
-            {"element": "Fe", "x": 0.5,   "y": 0.5,   "z": 0.0,   "color": "#ffd54f", "r": 0.13},
-            {"element": "S",  "x": 0.385, "y": 0.385, "z": 0.385, "color": "#fff176", "r": 0.11},
-            {"element": "S",  "x": 0.615, "y": 0.615, "z": 0.385, "color": "#fff176", "r": 0.11},
-            {"element": "S",  "x": 0.615, "y": 0.385, "z": 0.615, "color": "#fff176", "r": 0.11},
-            {"element": "S",  "x": 0.385, "y": 0.615, "z": 0.615, "color": "#fff176", "r": 0.11},
-        ],
-    },
+/* ── metric cards ── */
+.crystal-card {
+    background: linear-gradient(135deg, #0d1826 0%, #111e30 100%);
+    border: 1px solid #1e4070;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 6px 0;
+    position: relative;
+    overflow: hidden;
+}
+.crystal-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0;
+    width: 4px; height: 100%;
+    background: var(--accent);
+}
+.crystal-card h4 { margin: 0 0 4px 0; font-family: 'Rajdhani', sans-serif;
+                    font-size: 0.75rem; text-transform: uppercase;
+                    letter-spacing: 2px; color: #5a8ab8; }
+.crystal-card .val { font-family: 'Share Tech Mono', monospace;
+                      font-size: 1.6rem; color: var(--accent); margin: 0; }
+.crystal-card .sub { font-size: 0.78rem; color: #4a6a8a; margin: 4px 0 0 0; }
+
+/* ── bravais badge ── */
+.bravais-badge {
+    display: inline-block;
+    padding: 8px 20px;
+    border-radius: 4px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 2px solid var(--fg);
+    margin-bottom: 8px;
 }
 
-CRYSTAL_SYSTEM_INFO = {
-    "Triclinic":     {"axes": "a≠b≠c",  "angles": "α≠β≠γ≠90°", "lattices": ["P"],           "minerals": "Albite, Kyanite, Microcline"},
-    "Monoclinic":    {"axes": "a≠b≠c",  "angles": "α=γ=90°, β≠90°", "lattices": ["P","C"],  "minerals": "Orthoclase, Gypsum, Augite"},
-    "Orthorhombic":  {"axes": "a≠b≠c",  "angles": "α=β=γ=90°", "lattices": ["P","C","I","F"],"minerals": "Forsterite, Aragonite, Topaz"},
-    "Tetragonal":    {"axes": "a=b≠c",  "angles": "α=β=γ=90°", "lattices": ["P","I"],        "minerals": "Zircon, Rutile, Vesuvianite"},
-    "Trigonal":      {"axes": "a=b≠c",  "angles": "α=β=90°, γ=120°", "lattices": ["R"],      "minerals": "Calcite, Dolomite, Quartz"},
-    "Hexagonal":     {"axes": "a=b≠c",  "angles": "α=β=90°, γ=120°", "lattices": ["P"],      "minerals": "Quartz, Apatite, Beryl"},
-    "Cubic":         {"axes": "a=b=c",  "angles": "α=β=γ=90°", "lattices": ["P","I","F"],    "minerals": "Halite, Pyrite, Garnet, Fluorite"},
+/* ── param table ── */
+.param-row {
+    display: flex; justify-content: space-between;
+    padding: 5px 0; border-bottom: 1px solid #1a2e48;
+    font-family: 'Share Tech Mono', monospace; font-size: 0.85rem;
+}
+.param-row span:first-child { color: #4a8abf; }
+.param-row span:last-child  { color: #d0e8ff; }
+
+/* ── section divider ── */
+.sect-divider {
+    border: none; border-top: 1px solid #1a3456;
+    margin: 18px 0;
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Geometry helpers
-# ─────────────────────────────────────────────────────────────────────────────
+/* ── atom element chip ── */
+.elem-chip {
+    display: inline-block; padding: 2px 10px;
+    border-radius: 30px; margin: 2px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.8rem; font-weight: 600;
+}
 
-def cell_vectors(a, b, c, alpha, beta, gamma):
-    """Return Cartesian vectors a1, a2, a3 for the unit cell."""
-    al, be, ga = np.radians(alpha), np.radians(beta), np.radians(gamma)
-    # a along x
-    a1 = np.array([a, 0, 0])
-    # b in xy-plane
-    a2 = np.array([b * np.cos(ga), b * np.sin(ga), 0])
-    # c general
-    cx = c * np.cos(be)
-    cy = c * (np.cos(al) - np.cos(be) * np.cos(ga)) / np.sin(ga)
-    cz = np.sqrt(max(c*c - cx*cx - cy*cy, 0))
-    a3 = np.array([cx, cy, cz])
-    return a1, a2, a3
+/* ── plotly container ── */
+.js-plotly-plot .plotly .modebar {
+    background: transparent !important;
+}
 
-def frac_to_cart(fx, fy, fz, a1, a2, a3):
-    return fx * a1 + fy * a2 + fz * a3
+/* ── selectbox & sliders ── */
+[data-testid="stSelectbox"] > div,
+[data-testid="stSlider"] > div { color: #c8d8f0 !important; }
 
-def unit_cell_edges(a1, a2, a3):
-    """Return list of (start, end) pairs for the 12 edges of the parallelepiped."""
-    O = np.zeros(3)
-    corners = {
-        '000': O,
-        '100': a1,
-        '010': a2,
-        '001': a3,
-        '110': a1 + a2,
-        '101': a1 + a3,
-        '011': a2 + a3,
-        '111': a1 + a2 + a3,
-    }
-    edges = [
-        ('000','100'),('000','010'),('000','001'),
-        ('100','110'),('100','101'),
-        ('010','110'),('010','011'),
-        ('001','101'),('001','011'),
-        ('110','111'),('101','111'),('011','111'),
+/* ── info box ── */
+.info-box {
+    background: #0d1f35;
+    border-left: 3px solid #2a6496;
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin: 10px 0;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+
+/* hide streamlit default footer */
+footer { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════
+#  BRAVAIS LATTICE DATABASE
+# ══════════════════════════════════════════════════════
+BRAVAIS_DB = {
+    "aP": {"system":"Triclinic",     "centering":"Primitive",     "color":"#e74c3c", "bg":"#2d0b0b"},
+    "mP": {"system":"Monoclinic",    "centering":"Primitive",     "color":"#e67e22", "bg":"#2d1a0b"},
+    "mS": {"system":"Monoclinic",    "centering":"C-centered",    "color":"#f0a500", "bg":"#2d210b"},
+    "oP": {"system":"Orthorhombic",  "centering":"Primitive",     "color":"#2ecc71", "bg":"#0b2d1a"},
+    "oS": {"system":"Orthorhombic",  "centering":"C-centered",    "color":"#27ae60", "bg":"#0b2d18"},
+    "oF": {"system":"Orthorhombic",  "centering":"Face-centered", "color":"#1abc9c", "bg":"#0b2d28"},
+    "oI": {"system":"Orthorhombic",  "centering":"Body-centered", "color":"#16a085", "bg":"#0b2522"},
+    "tP": {"system":"Tetragonal",    "centering":"Primitive",     "color":"#3498db", "bg":"#0b1e2d"},
+    "tI": {"system":"Tetragonal",    "centering":"Body-centered", "color":"#2980b9", "bg":"#0b1a2d"},
+    "hR": {"system":"Rhombohedral",  "centering":"Rhombohedral",  "color":"#a569bd", "bg":"#1e0b2d"},
+    "hP": {"system":"Hexagonal",     "centering":"Primitive",     "color":"#8e44ad", "bg":"#1a0b2d"},
+    "cP": {"system":"Cubic",         "centering":"Primitive",     "color":"#7eb8f7", "bg":"#0b1e30"},
+    "cF": {"system":"Cubic",         "centering":"Face-centered", "color":"#5dade2", "bg":"#0b1c2e"},
+    "cI": {"system":"Cubic",         "centering":"Body-centered", "color":"#85c1e9", "bg":"#0b1e32"},
+}
+
+ELEMENT_COLORS = {
+    "H":"#ffffff","C":"#909090","N":"#3050F8","O":"#FF0D0D","F":"#90E050",
+    "Na":"#AB5CF2","Mg":"#8AFF00","Al":"#BFA6A6","Si":"#F0C8A0","P":"#FF8000",
+    "S":"#FFFF30","Cl":"#1FF01F","K":"#8F40D4","Ca":"#3DFF00","Fe":"#E06633",
+    "Cu":"#C88033","Zn":"#7D80B0","Br":"#A62929","Ag":"#C0C0C0","I":"#940094",
+    "Ba":"#00C900","Pb":"#575961","DEFAULT":"#ff88aa",
+}
+
+ELEMENT_RADII = {
+    "H":0.53,"C":0.77,"N":0.75,"O":0.73,"F":0.71,"Na":1.86,"Mg":1.60,
+    "Al":1.43,"Si":1.17,"P":1.10,"S":1.04,"Cl":0.99,"K":2.27,"Ca":1.97,
+    "Fe":1.26,"Cu":1.28,"Zn":1.22,"Br":1.14,"DEFAULT":1.0,
+}
+
+
+# ══════════════════════════════════════════════════════
+#  CIF PARSER  (pure Python – no gemmi)
+# ══════════════════════════════════════════════════════
+def _strip_esd(val: str) -> str:
+    """Remove estimated-standard-deviation parentheses: 8.897(3) → 8.897"""
+    return re.sub(r'\([^)]*\)', '', val).strip()
+
+def parse_cif(text: str) -> dict:
+    """Minimal CIF parser; returns dict of key→value / key→[list] pairs."""
+    # normalise line endings
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # remove comments
+    text = re.sub(r'#[^\n]*', '', text)
+
+    data = {}
+
+    # ── scalar values  _key   value ──────────────────
+    scalar_re = re.compile(
+        r"(_\S+)\s+"                       # key
+        r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))", # value: quoted or bare
+        re.MULTILINE
+    )
+    for m in scalar_re.finditer(text):
+        key = m.group(1).lower()
+        val = m.group(2) or m.group(3) or m.group(4)
+        data[key] = val
+
+    # ── semicolon text-fields ─────────────────────────
+    # Replace them before loop parsing so they don't confuse things
+    text_clean = re.sub(r'\n;.*?\n;', ' ? ', text, flags=re.DOTALL)
+
+    # ── loop_ blocks ──────────────────────────────────
+    loop_blocks = re.split(r'\bloop_\b', text_clean, flags=re.IGNORECASE)
+    for block in loop_blocks[1:]:
+        lines = [l.strip() for l in block.split('\n') if l.strip()]
+        headers = []
+        value_lines = []
+        mode = 'headers'
+        for line in lines:
+            if mode == 'headers':
+                if line.startswith('_'):
+                    headers.append(line.lower())
+                else:
+                    mode = 'values'
+                    value_lines.append(line)
+            else:
+                if line.startswith('_') or line.lower().startswith('loop_'):
+                    break
+                value_lines.append(line)
+
+        if not headers:
+            continue
+
+        # tokenise value lines
+        tokens = []
+        for vl in value_lines:
+            # handle quoted strings
+            for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", vl):
+                tokens.append(tok.strip("'\""))
+
+        n = len(headers)
+        if n == 0 or len(tokens) < n:
+            continue
+
+        rows = [tokens[i:i+n] for i in range(0, len(tokens) - n + 1, n)]
+        for i, h in enumerate(headers):
+            data[h] = [row[i] for row in rows if i < len(row)]
+
+    return data
+
+
+def extract_structure(cif_data: dict) -> dict:
+    """Pull out the crystal structure info we need from parsed CIF dict."""
+    def flt(key, default=0.0):
+        v = cif_data.get(key, str(default))
+        if isinstance(v, list): v = v[0]
+        try:    return float(_strip_esd(str(v)))
+        except: return default
+
+    a = flt('_cell_length_a',     8.0)
+    b = flt('_cell_length_b',     a)
+    c = flt('_cell_length_c',     a)
+    alpha = flt('_cell_angle_alpha', 90.0)
+    beta  = flt('_cell_angle_beta',  90.0)
+    gamma = flt('_cell_angle_gamma', 90.0)
+    volume= flt('_cell_volume',   0.0)
+
+    sg_hm   = cif_data.get('_symmetry_space_group_name_h-m','') or \
+              cif_data.get('_space_group_name_h-m_alt','')
+    sg_hall = cif_data.get('_symmetry_space_group_name_hall','') or \
+              cif_data.get('_space_group_name_hall','')
+    sg_num  = cif_data.get('_symmetry_int_tables_number','') or \
+              cif_data.get('_space_group_it_number','')
+    cell_setting = cif_data.get('_symmetry_cell_setting','')
+
+    if isinstance(sg_hm, list):   sg_hm = sg_hm[0]
+    if isinstance(sg_hall, list): sg_hall = sg_hall[0]
+    if isinstance(sg_num, list):  sg_num  = sg_num[0]
+    if isinstance(cell_setting, list): cell_setting = cell_setting[0]
+
+    # Atomic sites
+    labels  = cif_data.get('_atom_site_label', [])
+    fx_list = cif_data.get('_atom_site_fract_x', [])
+    fy_list = cif_data.get('_atom_site_fract_y', [])
+    fz_list = cif_data.get('_atom_site_fract_z', [])
+    elem_list = cif_data.get('_atom_site_type_symbol', labels)
+
+    atoms = []
+    for i in range(len(labels)):
+        try:
+            fx = float(_strip_esd(fx_list[i])) if i < len(fx_list) else 0.0
+            fy = float(_strip_esd(fy_list[i])) if i < len(fy_list) else 0.0
+            fz = float(_strip_esd(fz_list[i])) if i < len(fz_list) else 0.0
+            el = (elem_list[i] if i < len(elem_list) else labels[i])
+            el = re.sub(r'[^A-Za-z]', '', el)[:2].capitalize()
+            atoms.append({"label": labels[i], "element": el,
+                          "fx": fx, "fy": fy, "fz": fz})
+        except Exception:
+            continue
+
+    return dict(a=a,b=b,c=c,alpha=alpha,beta=beta,gamma=gamma,
+                volume=volume,sg_hm=str(sg_hm).strip("'\" "),
+                sg_hall=str(sg_hall).strip("'\" "),
+                sg_num=str(sg_num).strip(),
+                cell_setting=str(cell_setting).strip("'\" "),
+                atoms=atoms)
+
+
+# ══════════════════════════════════════════════════════
+#  BRAVAIS CLASSIFICATION  (from space-group H-M symbol)
+# ══════════════════════════════════════════════════════
+SYSTEM_TO_BRAVAIS = {
+    "triclinic":    {"P": "aP"},
+    "monoclinic":   {"P": "mP", "C": "mS", "A": "mS", "I": "mS"},
+    "orthorhombic": {"P": "oP", "C": "oS", "A": "oS", "B": "oS",
+                     "F": "oF", "I": "oI"},
+    "tetragonal":   {"P": "tP", "I": "tI"},
+    "trigonal":     {"P": "hP", "R": "hR"},
+    "rhombohedral": {"R": "hR", "P": "hP"},
+    "hexagonal":    {"P": "hP"},
+    "cubic":        {"P": "cP", "F": "cF", "I": "cI"},
+}
+
+def detect_bravais(sg_hm: str, cell_setting: str) -> str:
+    """Determine the 2-letter Bravais symbol from the H-M space group name."""
+    sg_clean = sg_hm.strip("'\" ")
+    centering = sg_clean[0].upper() if sg_clean else "P"
+
+    setting_lc = cell_setting.lower()
+    if not setting_lc:
+        # Infer from parameters or from H-M symbol prefix
+        hm_upper = sg_clean.upper()
+        for sys in SYSTEM_TO_BRAVAIS:
+            if sys.upper() in hm_upper:
+                setting_lc = sys
+                break
+
+    # Try every system
+    for sys, cmap in SYSTEM_TO_BRAVAIS.items():
+        if sys in setting_lc or setting_lc.startswith(sys[:4]):
+            return cmap.get(centering, list(cmap.values())[0])
+
+    # Last resort: guess from cell angles
+    return "aP"
+
+
+def classify_from_structure(s: dict) -> str:
+    bravais = detect_bravais(s["sg_hm"], s["cell_setting"])
+    # Sanity-check: if we got nothing, fall back by cell shape
+    if bravais not in BRAVAIS_DB:
+        a,b,c = s["a"],s["b"],s["c"]
+        al,be,ga = s["alpha"],s["beta"],s["gamma"]
+        all90 = all(abs(x-90)<0.5 for x in [al,be,ga])
+        if abs(a-b)<0.01 and abs(b-c)<0.01 and all90: return "cP"
+        if abs(a-b)<0.01 and all90: return "tP"
+        if all90: return "oP"
+        return "aP"
+    return bravais
+
+
+# ══════════════════════════════════════════════════════
+#  GEOMETRY HELPERS
+# ══════════════════════════════════════════════════════
+def cell_matrix(a,b,c,alpha_d,beta_d,gamma_d):
+    al,be,ga = math.radians(alpha_d),math.radians(beta_d),math.radians(gamma_d)
+    ax = a
+    bx = b*math.cos(ga);  by = b*math.sin(ga)
+    cx = c*math.cos(be)
+    cy = c*(math.cos(al)-math.cos(be)*math.cos(ga))/math.sin(ga)
+    cz = math.sqrt(max(c**2-cx**2-cy**2, 0.0))
+    return np.array([[ax,0,0],[bx,by,0],[cx,cy,cz]])
+
+def frac_to_cart(frac, M):
+    return M[0]*frac[0] + M[1]*frac[1] + M[2]*frac[2]
+
+def cell_edges(M, origin=None):
+    O = origin if origin is not None else np.zeros(3)
+    a,b,c = M[0],M[1],M[2]
+    return [
+        (O,     O+a),   (O,     O+b),   (O,     O+c),
+        (O+a,   O+a+b), (O+a,   O+a+c),
+        (O+b,   O+a+b), (O+b,   O+b+c),
+        (O+c,   O+a+c), (O+c,   O+b+c),
+        (O+a+b, O+a+b+c),(O+a+c,O+a+b+c),(O+b+c,O+a+b+c),
     ]
-    return [(corners[s], corners[e]) for s, e in edges]
 
-def centering_points(centering):
-    """Return fractional coords of extra lattice points for the centering type."""
-    pts = [(0,0,0)]
-    if centering == "I":
-        pts += [(0.5, 0.5, 0.5)]
-    elif centering == "F":
-        pts += [(0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)]
-    elif centering == "C":
-        pts += [(0.5, 0.5, 0)]
-    elif centering == "R":
-        pts += [(1/3, 2/3, 1/3), (2/3, 1/3, 2/3)]
-    elif centering == "A":
-        pts += [(0, 0.5, 0.5)]
-    elif centering == "B":
-        pts += [(0.5, 0, 0.5)]
-    return pts
+def centering_fracs(symbol):
+    c = symbol[1] if len(symbol)>1 else "P"
+    base = [(0,0,0),(1,0,0),(0,1,0),(0,0,1),(1,1,0),(1,0,1),(0,1,1),(1,1,1)]
+    extra = {"I":[(0.5,0.5,0.5)],
+             "F":[(0.5,0.5,0),(0.5,0,0.5),(0,0.5,0.5)],
+             "S":[(0.5,0.5,0)], "C":[(0.5,0.5,0)],
+             "R":[(2/3,1/3,1/3),(1/3,2/3,2/3)]}.get(c,[])
+    return base + extra
 
-def sphere_mesh(cx, cy, cz, r, n=12):
-    """Return (x,y,z) arrays for a sphere surface (for Mesh3d)."""
-    u = np.linspace(0, 2*np.pi, n)
-    v = np.linspace(0, np.pi, n)
-    x = cx + r * np.outer(np.cos(u), np.sin(v))
-    y = cy + r * np.outer(np.sin(u), np.sin(v))
-    z = cz + r * np.outer(np.ones(n), np.cos(v))
-    return x, y, z
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Plot builders
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_cell_figure(a, b, c, alpha, beta, gamma, centering, color,
-                      atoms=None, show_atoms=True, show_axes=True,
-                      show_centering=True, title="Unit Cell"):
-    """Build a 3D Plotly figure of a Bravais unit cell."""
-    a1, a2, a3 = cell_vectors(a, b, c, alpha, beta, gamma)
-    edges = unit_cell_edges(a1, a2, a3)
-
+# ══════════════════════════════════════════════════════
+#  PLOTLY FIGURE
+# ══════════════════════════════════════════════════════
+def build_figure(s: dict, bravais: str, opts: dict) -> go.Figure:
+    info  = BRAVAIS_DB[bravais]
+    color = info["color"]
+    M     = cell_matrix(s["a"],s["b"],s["c"],s["alpha"],s["beta"],s["gamma"])
+    sc    = opts.get("supercell", 1)
     traces = []
 
-    # ── Cell edges ────────────────────────────────────────────────────────────
-    for s, e in edges:
+    # ── unit cell edges (supercell) ───────────────────
+    for i in range(sc):
+        for j in range(sc):
+            for k in range(sc):
+                origin = i*M[0]+j*M[1]+k*M[2]
+                for (p1,p2) in cell_edges(M, origin):
+                    traces.append(go.Scatter3d(
+                        x=[p1[0],p2[0]], y=[p1[1],p2[1]], z=[p1[2],p2[2]],
+                        mode="lines",
+                        line=dict(color=color, width=2.5),
+                        showlegend=False, hoverinfo="skip",
+                    ))
+
+    # ── centering lattice points ──────────────────────
+    cf = centering_fracs(bravais)
+    all_pts = []
+    for i in range(sc):
+        for j in range(sc):
+            for k in range(sc):
+                off = i*M[0]+j*M[1]+k*M[2]
+                for (fx,fy,fz) in cf:
+                    pt = off + frac_to_cart((fx,fy,fz), M)
+                    all_pts.append(pt)
+    if all_pts:
+        px,py,pz = zip(*[(p[0],p[1],p[2]) for p in all_pts])
         traces.append(go.Scatter3d(
-            x=[s[0], e[0]], y=[s[1], e[1]], z=[s[2], e[2]],
-            mode="lines",
-            line=dict(color=color, width=4),
-            showlegend=False,
-            hoverinfo="skip",
+            x=px,y=py,z=pz, mode="markers",
+            marker=dict(size=7, color=color, opacity=0.9,
+                        line=dict(color="#0a0f1a", width=1)),
+            name=f"Lattice nodes ({info['centering']})",
+            hovertemplate="<b>Lattice point</b><br>x=%{x:.3f} Å<br>y=%{y:.3f} Å<br>z=%{z:.3f} Å<extra></extra>",
         ))
 
-    # ── Corner lattice points ─────────────────────────────────────────────────
-    corners_frac = [
-        (0,0,0),(1,0,0),(0,1,0),(0,0,1),
-        (1,1,0),(1,0,1),(0,1,1),(1,1,1)
-    ]
-    cx_list = [frac_to_cart(f[0],f[1],f[2],a1,a2,a3) for f in corners_frac]
-    traces.append(go.Scatter3d(
-        x=[p[0] for p in cx_list],
-        y=[p[1] for p in cx_list],
-        z=[p[2] for p in cx_list],
-        mode="markers",
-        marker=dict(size=7, color=color, symbol="circle",
-                    line=dict(color="white", width=1)),
-        name="Lattice points",
-        hoverinfo="skip",
-    ))
-
-    # ── Extra centering points ────────────────────────────────────────────────
-    if show_centering and centering != "P":
-        extra_frac = centering_points(centering)[1:]
-        ec_list = [frac_to_cart(f[0],f[1],f[2],a1,a2,a3) for f in extra_frac]
+    # ── basis vectors a b c ───────────────────────────
+    O = np.zeros(3)
+    for vec, lbl, col in zip(M, ["a","b","c"], ["#ff4e4e","#4ecc71","#4e9eff"]):
+        # draw arrow as thick line + cone
         traces.append(go.Scatter3d(
-            x=[p[0] for p in ec_list],
-            y=[p[1] for p in ec_list],
-            z=[p[2] for p in ec_list],
-            mode="markers",
-            marker=dict(size=10, color="#ffffff", symbol="circle",
-                        line=dict(color=color, width=3)),
-            name=f"{centering}-centering points",
+            x=[O[0],vec[0]], y=[O[1],vec[1]], z=[O[2],vec[2]],
+            mode="lines+text",
+            line=dict(color=col, width=5),
+            text=["", f"<b>{lbl}</b>"],
+            textposition="top center",
+            textfont=dict(size=14, color=col, family="Share Tech Mono"),
+            name=f"Axis {lbl}",
         ))
 
-    # ── Axes arrows (a, b, c) ─────────────────────────────────────────────────
-    if show_axes:
-        axis_data = [
-            (a1 * 1.15, "a", "#f44336"),
-            (a2 * 1.15, "b", "#4caf50"),
-            (a3 * 1.15, "c", "#2196f3"),
-        ]
-        for vec, label, acolor in axis_data:
+    # ── atoms ─────────────────────────────────────────
+    if opts.get("show_atoms", True) and s["atoms"]:
+        elem_groups: dict[str, list] = {}
+        for atom in s["atoms"]:
+            for i in range(sc):
+                for j in range(sc):
+                    for k in range(sc):
+                        off = i*M[0]+j*M[1]+k*M[2]
+                        cart = off + frac_to_cart((atom["fx"],atom["fy"],atom["fz"]), M)
+                        el = atom["element"]
+                        elem_groups.setdefault(el, []).append(
+                            (cart, atom["label"])
+                        )
+
+        for el, pts in elem_groups.items():
+            ecol = ELEMENT_COLORS.get(el, ELEMENT_COLORS["DEFAULT"])
+            rad  = ELEMENT_RADII.get(el, ELEMENT_RADII["DEFAULT"])
+            xs,ys,zs,lbls = zip(*[(p[0],p[1],p[2],lb) for (p,lb) in pts])
             traces.append(go.Scatter3d(
-                x=[0, vec[0]], y=[0, vec[1]], z=[0, vec[2]],
-                mode="lines+text",
-                line=dict(color=acolor, width=5),
-                text=["", f"<b>{label}</b>"],
-                textfont=dict(size=14, color=acolor),
-                textposition="top center",
-                showlegend=False,
-                hoverinfo="skip",
+                x=xs,y=ys,z=zs, mode="markers",
+                marker=dict(size=rad*3.5+2, color=ecol, opacity=0.85,
+                            line=dict(color="#0a0f1a", width=0.5)),
+                name=el,
+                hovertemplate=f"<b>%{{text}}</b> ({el})<br>"
+                              f"x=%{{x:.4f}} Å<br>y=%{{y:.4f}} Å<br>z=%{{z:.4f}} Å<extra></extra>",
+                text=lbls,
             ))
 
-    # ── Atom spheres ──────────────────────────────────────────────────────────
-    element_legend = set()
-    if show_atoms and atoms:
-        for atom in atoms:
-            pos = frac_to_cart(atom["x"], atom["y"], atom["z"], a1, a2, a3)
-            r_sphere = atom["r"] * max(a, b, c)
-            elem = atom["element"]
-            acolor = atom["color"]
-            show_leg = elem not in element_legend
-            element_legend.add(elem)
-
-            traces.append(go.Scatter3d(
-                x=[pos[0]], y=[pos[1]], z=[pos[2]],
-                mode="markers",
-                marker=dict(
-                    size=r_sphere * 35,
-                    color=acolor,
-                    opacity=0.85,
-                    line=dict(color="white", width=1),
-                ),
-                name=elem if show_leg else None,
-                showlegend=show_leg,
-                hovertemplate=f"<b>{elem}</b><br>"
-                              f"x={atom['x']:.3f}, y={atom['y']:.3f}, z={atom['z']:.3f}<extra></extra>",
-            ))
-
-    # ── Layout ────────────────────────────────────────────────────────────────
-    all_pts = [frac_to_cart(f[0],f[1],f[2],a1,a2,a3)
-               for f in [(0,0,0),(1,0,0),(0,1,0),(0,0,1),(1,1,0),(1,0,1),(0,1,1),(1,1,1)]]
-    xs = [p[0] for p in all_pts]; ys = [p[1] for p in all_pts]; zs = [p[2] for p in all_pts]
-    pad = max(a, b, c) * 0.25
-    fig = go.Figure(traces)
+    # ── layout ────────────────────────────────────────
+    fig = go.Figure(data=traces)
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16)),
+        paper_bgcolor="#070b14",
         scene=dict(
-            xaxis=dict(range=[min(xs)-pad, max(xs)+pad], showbackground=False,
-                       showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(range=[min(ys)-pad, max(ys)+pad], showbackground=False,
-                       showgrid=False, zeroline=False, showticklabels=False),
-            zaxis=dict(range=[min(zs)-pad, max(zs)+pad], showbackground=False,
-                       showgrid=False, zeroline=False, showticklabels=False),
-            bgcolor="#0e1117",
+            bgcolor="#070b14",
+            xaxis=dict(showbackground=False, showgrid=False,
+                       zeroline=False, color="#2a4a6a", title="x (Å)"),
+            yaxis=dict(showbackground=False, showgrid=False,
+                       zeroline=False, color="#2a4a6a", title="y (Å)"),
+            zaxis=dict(showbackground=False, showgrid=False,
+                       zeroline=False, color="#2a4a6a", title="z (Å)"),
             aspectmode="data",
-            camera=dict(eye=dict(x=1.6, y=1.2, z=0.9)),
         ),
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#0e1117",
-        font=dict(color="white"),
-        legend=dict(bgcolor="rgba(0,0,0,0.5)", font=dict(color="white")),
-        margin=dict(l=0, r=0, t=40, b=0),
-        height=520,
+        margin=dict(l=0,r=0,t=0,b=0),
+        height=580,
+        legend=dict(
+            bgcolor="rgba(7,11,20,0.85)",
+            bordercolor="#1e3a5f",
+            borderwidth=1,
+            font=dict(family="Share Tech Mono", size=11, color="#7eb8f7"),
+        ),
+        uirevision="constant",
     )
     return fig
 
 
-def build_all14_figure():
-    """Build a 3×5 grid overview of all 14 Bravais lattice types."""
-    from plotly.subplots import make_subplots
+def build_all14_figure() -> go.Figure:
+    """Schematic overview of all 14 Bravais lattices."""
+    representative = [
+        ("aP", 1.0,1.2,1.5, 70,80,85),
+        ("mP", 1.0,1.2,1.5, 90,110,90),
+        ("mS", 1.0,1.2,1.5, 90,110,90),
+        ("oP", 1.0,1.2,1.5, 90,90,90),
+        ("oS", 1.0,1.2,1.5, 90,90,90),
+        ("oF", 1.0,1.2,1.5, 90,90,90),
+        ("oI", 1.0,1.2,1.5, 90,90,90),
+        ("tP", 1.0,1.0,1.5, 90,90,90),
+        ("tI", 1.0,1.0,1.5, 90,90,90),
+        ("hR", 1.0,1.0,1.0, 75,75,75),
+        ("hP", 1.0,1.0,1.5, 90,90,120),
+        ("cP", 1.0,1.0,1.0, 90,90,90),
+        ("cF", 1.0,1.0,1.0, 90,90,90),
+        ("cI", 1.0,1.0,1.0, 90,90,90),
+    ]
+    traces = []
+    annots = []
+    cols = 7
+    sx, sz = 3.4, 3.4
 
-    names = list(BRAVAIS_LATTICES.keys())
-    cols = 4
-    rows = (len(names) + cols - 1) // cols  # 4 rows
+    for idx,(sym,a,b,c,al,be,ga) in enumerate(representative):
+        ri,ci = divmod(idx, cols)
+        off = np.array([ci*sx, 0.0, -ri*sz])
+        M   = cell_matrix(a,b,c,al,be,ga)
+        info = BRAVAIS_DB[sym]
+        col  = info["color"]
 
-    specs = [[{"type": "scatter3d"} for _ in range(cols)] for _ in range(rows)]
-    subtitles = names + [""] * (rows * cols - len(names))
-
-    fig = make_subplots(
-        rows=rows, cols=cols,
-        specs=specs,
-        subplot_titles=subtitles,
-        horizontal_spacing=0.02,
-        vertical_spacing=0.06,
-    )
-
-    for idx, (name, bl) in enumerate(BRAVAIS_LATTICES.items()):
-        row = idx // cols + 1
-        col = idx % cols + 1
-        a1, a2, a3 = cell_vectors(bl["a"], bl["b"], bl["c"],
-                                   bl["alpha"], bl["beta"], bl["gamma"])
-        edges = unit_cell_edges(a1, a2, a3)
-        color = bl["color"]
-
-        for s, e in edges:
-            fig.add_trace(go.Scatter3d(
-                x=[s[0], e[0]], y=[s[1], e[1]], z=[s[2], e[2]],
-                mode="lines", line=dict(color=color, width=3),
+        for (p1,p2) in cell_edges(M, off):
+            traces.append(go.Scatter3d(
+                x=[p1[0],p2[0]], y=[p1[1],p2[1]], z=[p1[2],p2[2]],
+                mode="lines", line=dict(color=col, width=2),
                 showlegend=False, hoverinfo="skip",
-            ), row=row, col=col)
+            ))
 
-        corners = [frac_to_cart(f[0],f[1],f[2],a1,a2,a3)
-                   for f in [(0,0,0),(1,0,0),(0,1,0),(0,0,1),(1,1,0),(1,0,1),(0,1,1),(1,1,1)]]
-        fig.add_trace(go.Scatter3d(
-            x=[p[0] for p in corners],
-            y=[p[1] for p in corners],
-            z=[p[2] for p in corners],
-            mode="markers",
-            marker=dict(size=5, color=color),
-            showlegend=False, hoverinfo="skip",
-        ), row=row, col=col)
+        pts = [off + frac_to_cart(f,M) for f in centering_fracs(sym)]
+        lx,ly,lz = zip(*[(p[0],p[1],p[2]) for p in pts])
+        traces.append(go.Scatter3d(
+            x=lx,y=ly,z=lz, mode="markers",
+            marker=dict(size=5, color=col, opacity=0.9),
+            name=sym,
+            hovertemplate=f"<b>{sym}</b><br>{info['system']}<br>{info['centering']}<extra></extra>",
+        ))
 
-        if bl["centering"] != "P":
-            extra = centering_points(bl["centering"])[1:]
-            ec = [frac_to_cart(f[0],f[1],f[2],a1,a2,a3) for f in extra]
-            fig.add_trace(go.Scatter3d(
-                x=[p[0] for p in ec], y=[p[1] for p in ec], z=[p[2] for p in ec],
-                mode="markers",
-                marker=dict(size=8, color="white", line=dict(color=color, width=2)),
-                showlegend=False, hoverinfo="skip",
-            ), row=row, col=col)
+        ctr = off + 0.5*(M[0]+M[1]+M[2])
+        annots.append(dict(
+            x=ctr[0], y=ctr[1]+0.2, z=ctr[2]+1.3,
+            text=f"<b>{sym}</b>",
+            showarrow=False,
+            font=dict(size=12, color=col, family="Share Tech Mono"),
+        ))
 
-    scene_settings = dict(
-        showbackground=False, showgrid=False,
-        zeroline=False, showticklabels=False,
-    )
-    for i in range(1, rows * cols + 1):
-        fig.update_layout(**{
-            f"scene{i if i > 1 else ''}": dict(
-                xaxis=scene_settings, yaxis=scene_settings, zaxis=scene_settings,
-                bgcolor="#0e1117", aspectmode="cube",
-                camera=dict(eye=dict(x=1.8, y=1.4, z=1.0)),
-            )
-        })
-
+    fig = go.Figure(data=traces)
     fig.update_layout(
-        paper_bgcolor="#0e1117",
-        font=dict(color="white", size=10),
-        height=950,
-        title=dict(text="All 14 Bravais Lattice Types", font=dict(size=18)),
-        margin=dict(l=0, r=0, t=60, b=0),
+        paper_bgcolor="#070b14",
+        scene=dict(
+            bgcolor="#070b14",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            annotations=annots,
+            aspectmode="data",
+        ),
+        margin=dict(l=0,r=0,t=10,b=0),
+        height=500,
+        showlegend=False,
     )
     return fig
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Streamlit App
-# ─────────────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="Bravais Cell Visualizer", page_icon="🔷", layout="wide")
-
-st.title("🔷 Bravais Lattice Cell Visualizer")
-st.markdown(
-    "Interactive 3D visualization of the **14 Bravais lattice types** "
-    "and real mineral unit cells with atomic positions."
-)
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  SIDEBAR
+# ══════════════════════════════════════════════════════
 with st.sidebar:
-    st.header("⚙️ View Options")
+    st.markdown("""
+    <div style="text-align:center;margin-bottom:16px">
+      <span style="font-family:'Rajdhani',sans-serif;font-size:1.5rem;
+                   color:#7eb8f7;letter-spacing:3px;font-weight:700">
+        🔷 BRAVAIS<br>LATTICE VIEWER
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
 
-    view_mode = st.radio(
-        "Mode",
-        ["🔬 Mineral Cell", "📐 Generic Bravais Lattice", "🗂️ All 14 Lattices"],
-        index=0,
+    uploaded = st.file_uploader("Upload CIF file", type=["cif"],
+                                 label_visibility="collapsed")
+
+    st.markdown('<hr class="sect-divider">', unsafe_allow_html=True)
+    st.markdown("**⚙ Display Options**")
+
+    show_atoms  = st.checkbox("Show atomic positions", value=True)
+    supercell   = st.select_slider("Supercell", options=[1,2,3], value=1)
+    show_all14  = st.checkbox("Show all 14 Bravais lattices", value=False)
+
+    st.markdown('<hr class="sect-divider">', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-size:0.75rem;color:#3a6080;line-height:1.7">
+    Parses CIF files natively.<br>
+    Renders interactive 3-D lattice<br>
+    visualisations with Plotly.<br><br>
+    <b style="color:#4a80a0">Rotate</b> · drag<br>
+    <b style="color:#4a80a0">Zoom</b> · scroll<br>
+    <b style="color:#4a80a0">Pan</b> · right-drag
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════
+#  MAIN PANEL
+# ══════════════════════════════════════════════════════
+st.markdown("""
+<h1 style="margin-bottom:0">🔷 Bravais Lattice Viewer</h1>
+<p style="color:#3a6080;font-family:'Share Tech Mono',monospace;
+          margin-top:2px;font-size:0.82rem;letter-spacing:1px">
+  CRYSTALLOGRAPHIC STRUCTURE ANALYSIS  ·  CIF FORMAT
+</p>
+""", unsafe_allow_html=True)
+
+# ── All-14 overview ────────────────────────────────────
+if show_all14:
+    st.markdown("### All 14 Bravais Lattices")
+    st.plotly_chart(build_all14_figure(), use_container_width=True)
+    st.markdown('<hr class="sect-divider">', unsafe_allow_html=True)
+
+# ── No file yet ────────────────────────────────────────
+if uploaded is None:
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        st.markdown("""
+        <div class="crystal-card" style="--accent:#7eb8f7">
+          <h4>What is a CIF?</h4>
+          <p style="font-size:0.85rem;color:#8ab0d0;line-height:1.6;margin:0">
+            A <b>Crystallographic Information File</b> stores unit-cell 
+            parameters, space group symmetry and atomic coordinates for 
+            crystalline materials.
+          </p>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown("""
+        <div class="crystal-card" style="--accent:#4ecc71">
+          <h4>Bravais Lattices</h4>
+          <p style="font-size:0.85rem;color:#8ab0d0;line-height:1.6;margin:0">
+            There are <b>14 unique</b> 3-D periodic arrangements of lattice 
+            points, grouped into 7 crystal systems and 4 centering types.
+          </p>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        st.markdown("""
+        <div class="crystal-card" style="--accent:#a569bd">
+          <h4>Features</h4>
+          <p style="font-size:0.85rem;color:#8ab0d0;line-height:1.6;margin:0">
+            Interactive 3-D cell · Centering points · Atom overlay · 
+            Supercell expansion · All-14 overview panel.
+          </p>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="info-box" style="margin-top:24px">
+      👈  <b>Upload a CIF file</b> in the sidebar to begin visualisation.
+      <br>Try enabling <i>"Show all 14 Bravais lattices"</i> above for a reference overview.
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+# ══════════════════════════════════════════════════════
+#  PARSE & DISPLAY
+# ══════════════════════════════════════════════════════
+raw_text = uploaded.read().decode("utf-8", errors="replace")
+
+try:
+    cif_data  = parse_cif(raw_text)
+    s         = extract_structure(cif_data)
+    bravais   = classify_from_structure(s)
+    info      = BRAVAIS_DB[bravais]
+except Exception as exc:
+    st.error(f"❌ Could not parse CIF: {exc}")
+    st.stop()
+
+color = info["color"]
+system = info["system"]
+centering = info["centering"]
+
+# ── Info row ───────────────────────────────────────────
+st.markdown(f"""
+<div style="display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;margin:12px 0 20px 0">
+
+  <div class="crystal-card" style="--accent:{color};flex:0 0 auto;min-width:170px">
+    <h4>Bravais Lattice</h4>
+    <div class="bravais-badge" style="--bg:{info['bg']};--fg:{color}">{bravais}</div>
+    <div class="sub">{system} · {centering}</div>
+  </div>
+
+  <div class="crystal-card" style="--accent:#7eb8f7;flex:1;min-width:220px">
+    <h4>Space Group</h4>
+    <div class="val" style="font-size:1.1rem">{s['sg_hm'] or '—'}</div>
+    <div class="sub">
+      Hall:&nbsp;{s['sg_hall'] or '—'} &nbsp;|&nbsp; No.&nbsp;{s['sg_num'] or '—'}
+      &nbsp;|&nbsp; {s['cell_setting'] or '—'}
+    </div>
+  </div>
+
+  <div class="crystal-card" style="--accent:#4ecc71;flex:1;min-width:220px">
+    <h4>Unit Cell Parameters</h4>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+      <div class="param-row"><span>a</span><span>{s['a']:.5f} Å</span></div>
+      <div class="param-row"><span>α</span><span>{s['alpha']:.3f}°</span></div>
+      <div class="param-row"><span>b</span><span>{s['b']:.5f} Å</span></div>
+      <div class="param-row"><span>β</span><span>{s['beta']:.3f}°</span></div>
+      <div class="param-row"><span>c</span><span>{s['c']:.5f} Å</span></div>
+      <div class="param-row"><span>γ</span><span>{s['gamma']:.3f}°</span></div>
+    </div>
+  </div>
+
+  <div class="crystal-card" style="--accent:#a569bd;flex:0 0 auto;min-width:150px">
+    <h4>Volume</h4>
+    <div class="val">{s['volume']:.1f}</div>
+    <div class="sub">Å³</div>
+    <hr class="sect-divider" style="margin:10px 0">
+    <h4>Atoms (asym. unit)</h4>
+    <div class="val">{len(s['atoms'])}</div>
+  </div>
+
+</div>
+""", unsafe_allow_html=True)
+
+# ── Element chips ─────────────────────────────────────
+if s["atoms"]:
+    elems = sorted({a["element"] for a in s["atoms"]})
+    chips = "".join(
+        f'<span class="elem-chip" '
+        f'style="background:{ELEMENT_COLORS.get(e,ELEMENT_COLORS["DEFAULT"])}22;'
+        f'color:{ELEMENT_COLORS.get(e,ELEMENT_COLORS["DEFAULT"])};'
+        f'border:1px solid {ELEMENT_COLORS.get(e,ELEMENT_COLORS["DEFAULT"])}66">'
+        f'{e}</span>'
+        for e in elems
     )
+    st.markdown(f"**Elements present:** {chips}", unsafe_allow_html=True)
 
-    if view_mode == "🔬 Mineral Cell":
-        mineral_sel = st.selectbox("Select Mineral", list(MINERALS.keys()))
+st.markdown('<hr class="sect-divider">', unsafe_allow_html=True)
 
-    elif view_mode == "📐 Generic Bravais Lattice":
-        lattice_sel = st.selectbox("Select Bravais Lattice", list(BRAVAIS_LATTICES.keys()))
+# ── 3-D figure ────────────────────────────────────────
+opts = {"show_atoms": show_atoms, "supercell": supercell}
+fig  = build_figure(s, bravais, opts)
+st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-    show_atoms      = st.toggle("Show Atoms",             value=True)
-    show_axes       = st.toggle("Show a/b/c Axes",        value=True)
-    show_centering  = st.toggle("Show Centering Points",  value=True)
+# ── Atom site table ────────────────────────────────────
+if show_atoms and s["atoms"]:
+    with st.expander(f"🔬 Atom site coordinates  ({len(s['atoms'])} sites in asymmetric unit)"):
+        M = cell_matrix(s["a"],s["b"],s["c"],s["alpha"],s["beta"],s["gamma"])
+        rows = []
+        for atom in s["atoms"]:
+            cart = frac_to_cart((atom["fx"],atom["fy"],atom["fz"]), M)
+            rows.append({
+                "Label": atom["label"], "Element": atom["element"],
+                "x (frac)": f"{atom['fx']:.5f}",
+                "y (frac)": f"{atom['fy']:.5f}",
+                "z (frac)": f"{atom['fz']:.5f}",
+                "x (Å)": f"{cart[0]:.4f}",
+                "y (Å)": f"{cart[1]:.4f}",
+                "z (Å)": f"{cart[2]:.4f}",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                     hide_index=True, height=200)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main content
-# ─────────────────────────────────────────────────────────────────────────────
-
-if view_mode == "🗂️ All 14 Lattices":
-    st.subheader("All 14 Bravais Lattice Types")
-    with st.spinner("Rendering 14 lattices…"):
-        fig = build_all14_figure()
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Summary table
-    st.subheader("Crystal System Reference")
-    rows = []
-    for system, info in CRYSTAL_SYSTEM_INFO.items():
-        rows.append({
-            "Crystal System": system,
-            "Axes": info["axes"],
-            "Angles": info["angles"],
-            "Bravais Types": " · ".join(info["lattices"]),
-            "Example Minerals": info["minerals"],
+# ── Quick-reference table ──────────────────────────────
+with st.expander("📚 All 14 Bravais Lattices — reference"):
+    ref_rows = []
+    for sym, d in BRAVAIS_DB.items():
+        ref_rows.append({
+            "Symbol": sym, "Crystal System": d["system"],
+            "Centering": d["centering"],
+            "Detected ✓": "◆" if sym == bravais else ""
         })
-    import pandas as pd
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-elif view_mode == "📐 Generic Bravais Lattice":
-    bl = BRAVAIS_LATTICES[lattice_sel]
-
-    col_info, col_plot = st.columns([1, 2])
-    with col_info:
-        st.subheader(lattice_sel)
-        system = bl["system"]
-        info = CRYSTAL_SYSTEM_INFO.get(system, {})
-        st.markdown(f"""
-| Property | Value |
-|---|---|
-| **Crystal System** | {system} |
-| **Centering** | {bl['centering']} |
-| **Symbol** | {bl['symbol']} |
-| **Axes** | {info.get('axes', '—')} |
-| **Angles** | {info.get('angles', '—')} |
-| **Example Minerals** | {info.get('minerals', '—')} |
-        """)
-
-        st.divider()
-        st.markdown("**Unit Cell Parameters (normalized)**")
-        c1, c2 = st.columns(2)
-        with c1:
-            a = st.number_input("a", value=bl["a"], step=0.05, format="%.3f", key="bl_a")
-            b = st.number_input("b", value=bl["b"], step=0.05, format="%.3f", key="bl_b")
-            c = st.number_input("c", value=bl["c"], step=0.05, format="%.3f", key="bl_c")
-        with c2:
-            alpha = st.number_input("α (°)", value=float(bl["alpha"]), step=1.0, key="bl_al")
-            beta  = st.number_input("β (°)", value=float(bl["beta"]),  step=1.0, key="bl_be")
-            gamma = st.number_input("γ (°)", value=float(bl["gamma"]), step=1.0, key="bl_ga")
-
-    with col_plot:
-        fig = build_cell_figure(
-            a, b, c, alpha, beta, gamma,
-            bl["centering"], bl["color"],
-            atoms=None, show_atoms=False,
-            show_axes=show_axes, show_centering=show_centering,
-            title=f"{lattice_sel}  |  {system}",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-else:  # Mineral Cell
-    mineral = MINERALS[mineral_sel]
-    bl_name = mineral["bravais"]
-    bl = BRAVAIS_LATTICES[bl_name]
-    system = bl["system"]
-    info = CRYSTAL_SYSTEM_INFO.get(system, {})
-
-    col_info, col_plot = st.columns([1, 2])
-    with col_info:
-        st.subheader(mineral_sel)
-        st.markdown(f"""
-| Property | Value |
-|---|---|
-| **Bravais Lattice** | {bl_name} |
-| **Crystal System** | {system} |
-| **Space Group** | {mineral.get('space_group','—')} |
-| **a** | {mineral['a']} Å |
-| **b** | {mineral['b']} Å |
-| **c** | {mineral['c']} Å |
-| **α** | {mineral['alpha']}° |
-| **β** | {mineral['beta']}° |
-| **γ** | {mineral['gamma']}° |
-        """)
-
-        # Volume
-        a1, a2, a3 = cell_vectors(
-            mineral["a"], mineral["b"], mineral["c"],
-            mineral["alpha"], mineral["beta"], mineral["gamma"]
-        )
-        V = abs(np.dot(a1, np.cross(a2, a3)))
-        st.metric("Cell Volume", f"{V:.2f} Å³")
-
-        st.divider()
-        st.markdown("**Atom Legend**")
-        elem_seen = {}
-        for atom in mineral["atoms"]:
-            if atom["element"] not in elem_seen:
-                elem_seen[atom["element"]] = atom["color"]
-        for elem, col in elem_seen.items():
-            st.markdown(
-                f'<span style="background:{col};padding:2px 10px;border-radius:4px;'
-                f'color:#000;font-weight:bold">{elem}</span>',
-                unsafe_allow_html=True
-            )
-
-    with col_plot:
-        fig = build_cell_figure(
-            mineral["a"], mineral["b"], mineral["c"],
-            mineral["alpha"], mineral["beta"], mineral["gamma"],
-            bl["centering"], bl["color"],
-            atoms=mineral["atoms"] if show_atoms else None,
-            show_atoms=show_atoms,
-            show_axes=show_axes, show_centering=show_centering,
-            title=f"{mineral_sel}  ·  {bl_name}  ·  {mineral.get('space_group','')}",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Atom table
-    if show_atoms:
-        st.subheader("Atomic Positions (fractional coordinates)")
-        import pandas as pd
-        df_atoms = pd.DataFrame([
-            {"Element": a["element"], "x": a["x"], "y": a["y"], "z": a["z"]}
-            for a in mineral["atoms"]
-        ])
-        # Convert fractional to Cartesian
-        a1, a2, a3 = cell_vectors(
-            mineral["a"], mineral["b"], mineral["c"],
-            mineral["alpha"], mineral["beta"], mineral["gamma"]
-        )
-        cartesian = [frac_to_cart(row.x, row.y, row.z, a1, a2, a3) for row in df_atoms.itertuples()]
-        df_atoms["X (Å)"] = [f"{p[0]:.4f}" for p in cartesian]
-        df_atoms["Y (Å)"] = [f"{p[1]:.4f}" for p in cartesian]
-        df_atoms["Z (Å)"] = [f"{p[2]:.4f}" for p in cartesian]
-        st.dataframe(df_atoms, use_container_width=True, hide_index=True)
-
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.divider()
-st.caption(
-    "Unit cell geometry computed via the metric tensor. "
-    "Centering: P=primitive · I=body · F=face-centred · C=base-centred · R=rhombohedral. "
-    "Atomic radii are scaled for display purposes."
-)
+    df = pd.DataFrame(ref_rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)

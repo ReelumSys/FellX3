@@ -8,6 +8,7 @@ import numpy as np
 from scipy.integrate import simpson
 from scipy.integrate import trapezoid
 from scipy import*
+from main import cif_file2
 
 # Contents of ~/my_app/main_page.py
 
