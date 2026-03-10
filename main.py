@@ -14,6 +14,8 @@ from PIL import Image
 import os
 from pymatgen.core import Structure
 from ase.io import read, write
+from pymatgen.core import Structure
+from pymatgen.io.cif import CifWriter
 
 st.set_page_config(
     page_title="Multipage App",
@@ -68,6 +70,15 @@ st.success('Done.')
 
 atoms = read(cif_file2)
 write("cif_file2.cif", atoms)
+
+'''
+# Method 2: Using CifWriter for more control (e.g., symmetry information)
+output_filename_writer = "cif_file.cif"
+writer = CifWriter(structure, symprec=0.001) # symprec for space group determination
+writer.write_file(output_filename_writer)
+print(f"Structure saved to {output_filename_writer} using CifWriter()")
+'''
+
 
 df = pd.read_fwf(name)
 df.to_csv('First.csv', index=False)
