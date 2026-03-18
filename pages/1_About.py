@@ -16,9 +16,9 @@ st.write("You have discovered FellX! It is a analytical programm for XRD data. T
 
 
 
-st.title("ChatGPT-like clone")
+st.title("XRDGPT")
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+client = OpenAI(api_key=st.secrets["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"])
 
 if "openai_model" not in st.session_state:
     st.session_state["openai_model"] = "gpt-3.5-turbo"
