@@ -19,8 +19,6 @@ st.write("You have discovered FellX! It is a analytical programm for XRD data. T
 
 
 
-st.title("XRDGPT")
-
 
 
 # ── Page config ──────────────────────────────────────────────────────────────

@@ -1,960 +1,514 @@
-﻿"""
-Diffraction Analyser — Full Profile Refinement (Le Bail + Rietveld)
-Run with:  streamlit run diffraction_analyser.py
-Requires:  pip install streamlit numpy scipy plotly pandas
-"""
 
 import streamlit as st
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy.optimize import least_squares
 import pandas as pd
-import warnings
 
-warnings.filterwarnings("ignore")
-
-st.set_page_config(
-    page_title="Diffraction Analyser",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CSS
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stMetricValue"] { font-size: 1.3rem; }
-.block-container { padding-top: 1rem; }
-.stTabs [data-baseweb="tab"] { font-size: 0.95rem; font-weight: 600; }
-h1 { font-size: 1.8rem !important; }
-h2 { font-size: 1.2rem !important; }
-h3 { font-size: 1.05rem !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CRYSTALLOGRAPHY UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
-
-def d_spacing(h, k, l, a, b, c, alpha_deg, beta_deg, gamma_deg, system):
-    """Return d-spacing (Å) for a given reflection and crystal system."""
-    ar, br, gr = (np.radians(x) for x in (alpha_deg, beta_deg, gamma_deg))
-    h, k, l = float(h), float(k), float(l)
-
-    if system == "Cubic":
-        inv = (h**2 + k**2 + l**2) / a**2
-    elif system == "Tetragonal":
-        inv = (h**2 + k**2) / a**2 + l**2 / c**2
-    elif system == "Orthorhombic":
-        inv = h**2/a**2 + k**2/b**2 + l**2/c**2
-    elif system == "Hexagonal":
-        inv = 4/3*(h**2 + h*k + k**2)/a**2 + l**2/c**2
-    elif system == "Monoclinic":
-        sb = np.sin(br)
-        inv = (1/sb**2)*(h**2/a**2 + k**2*sb**2/b**2 + l**2/c**2
-                         - 2*h*l*np.cos(br)/(a*c))
-    else:  # Triclinic
-        ca, cb, cg = np.cos(ar), np.cos(br), np.cos(gr)
-        sa, sb, sg = np.sin(ar), np.sin(br), np.sin(gr)
-        V = a*b*c*np.sqrt(1 - ca**2 - cb**2 - cg**2 + 2*ca*cb*cg)
-        if V < 1e-10:
-            return None
-        inv = (b**2*c**2*sa**2*h**2 + a**2*c**2*sb**2*k**2 + a**2*b**2*sg**2*l**2
-               + 2*a*b*c**2*(ca*cb-cg)*h*k
-               + 2*a**2*b*c*(cb*cg-ca)*k*l
-               + 2*a*b**2*c*(ca*cg-cb)*h*l) / V**2
-
-    return None if inv <= 1e-12 else 1.0/np.sqrt(inv)
-
-
-def is_absent(h, k, l, sg):
-    """Very simplified systematic absence check based on lattice centering."""
-    h, k, l = int(h), int(k), int(l)
-    sg = sg.upper().replace(" ", "")
-    if sg.startswith("I") and (h+k+l) % 2 != 0:
-        return True
-    if sg.startswith("F"):
-        parities = {h%2, k%2, l%2}
-        if len(parities) > 1:
-            return True
-    if sg.startswith("C") and (h+k) % 2 != 0:
-        return True
-    if sg.startswith("A") and (k+l) % 2 != 0:
-        return True
-    if sg.startswith("B") and (h+l) % 2 != 0:
-        return True
-    # FD screw axes (very simplified)
-    if "FD" in sg or "Fd" in sg.replace("-",""):
-        if h == 0 and k == 0 and l % 4 != 0:
-            return True
-    return False
-
-
-def gen_reflections(a, b, c, alpha, beta, gamma, system, sg, wl, tt_min, tt_max):
-    """Return list of (h,k,l,d,2theta,I_lb) for all allowed reflections."""
-    d_min = wl / (2*np.sin(np.radians(tt_max/2)))
-    d_max = wl / (2*np.sin(np.radians(max(tt_min, 0.5)/2)))
-    mh = int(2*a/d_min)+2
-    mk = int(2*b/d_min)+2
-    ml = int(2*c/d_min)+2
-
-    seen = {}
-    for h in range(-mh, mh+1):
-        for k in range(-mk, mk+1):
-            for l in range(-ml, ml+1):
-                if h == k == l == 0:
-                    continue
-                if is_absent(h, k, l, sg):
-                    continue
-                d = d_spacing(h, k, l, a, b, c, alpha, beta, gamma, system)
-                if d is None or not (d_min <= d <= d_max):
-                    continue
-                tt = 2*np.degrees(np.arcsin(np.clip(wl/(2*d), -1, 1)))
-                key = round(tt, 4)
-                if key not in seen:
-                    seen[key] = [h, k, l, d, tt, 1000.0]
-    refs = sorted(seen.values(), key=lambda r: r[4])
-    return refs
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PROFILE & BACKGROUND FUNCTIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def pseudo_voigt(x, x0, fwhm, eta):
-    """Normalised pseudo-Voigt profile."""
-    eta = np.clip(eta, 0, 1)
-    fwhm = max(fwhm, 1e-6)
-    sigma = fwhm / (2*np.sqrt(2*np.log(2)))
-    G = np.exp(-0.5*((x-x0)/sigma)**2)
-    L = 1.0 / (1 + ((x-x0)/(fwhm/2))**2)
-    return eta*L + (1-eta)*G
-
-
-def caglioti_fwhm(tt, U, V, W):
-    th = np.radians(tt/2)
-    tan_th = np.tan(th)
-    return max(np.sqrt(max(U*tan_th**2 + V*tan_th + W, 1e-8)), 0.005)
-
-
-def chebyshev_bg(tt, coeffs):
-    x = 2*(tt - tt.min())/(tt.max()-tt.min()) - 1
-    T = [np.ones_like(x), x, 2*x**2-1, 4*x**3-3*x,
-         8*x**4-8*x**2+1, 16*x**5-20*x**3+5*x,
-         32*x**6-48*x**4+18*x**2-1, 64*x**7-112*x**5+56*x**3-7*x]
-    result = np.zeros_like(x)
-    for i, c in enumerate(coeffs):
-        result += c * T[i]
-    return result
-
-
-def lp_factor(tt):
-    th = np.radians(tt/2)
-    cos2 = np.cos(np.radians(tt))**2
-    return (1+cos2) / (np.sin(th)**2 * np.cos(th) + 1e-12)
-
-
-def multiplicity(h, k, l, system):
-    h, k, l = abs(int(h)), abs(int(k)), abs(int(l))
-    zeros = sum(x == 0 for x in [h, k, l])
-    if system == "Cubic":
-        eq = len({h, k, l})
-        if eq == 1:    return 8
-        if eq == 2:    return 24
-        return 48
-    elif system == "Tetragonal":
-        if h == 0 and k == 0: return 2
-        base = 4 if h == k else 8
-        return base if l == 0 else base*2
-    elif system == "Hexagonal":
-        if h == 0 and k == 0: return 2
-        return 12 if l != 0 else 6
-    elif system == "Orthorhombic":
-        return 2**(3-zeros)*2
-    return max(2**(3-zeros), 1)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ATOMIC SCATTERING FACTORS (Cromer-Mann)
-# ─────────────────────────────────────────────────────────────────────────────
-
-CM = {
-    "H":  ([0.4899,0.2620,0.1968,0.0499],[20.659,7.740,49.552,2.202],0.001),
-    "C":  ([2.310,1.020,1.589,0.865],[20.844,10.208,0.569,51.651],0.216),
-    "N":  ([12.213,3.132,2.013,1.166],[0.006,9.893,28.997,0.583],-11.529),
-    "O":  ([3.049,2.287,1.546,0.867],[13.277,5.701,0.324,32.909],0.251),
-    "Na": ([4.763,3.174,1.267,1.113],[3.285,8.842,0.314,129.424],0.676),
-    "MG": ([5.420,2.174,1.227,2.307],[2.828,79.261,0.381,7.194],0.858),
-    "AL": ([6.420,1.900,1.594,1.965],[3.039,0.743,31.547,85.089],1.115),
-    "SI": ([6.292,3.035,1.989,1.541],[2.439,32.334,0.679,81.694],1.141),
-    "CA": ([8.627,7.387,1.590,1.021],[10.442,0.660,85.748,178.437],1.375),
-    "TI": ([9.760,7.359,1.699,1.902],[7.851,0.500,35.634,116.105],1.281),
-    "FE": ([11.770,7.357,3.522,2.305],[4.761,0.307,15.354,76.881],1.037),
-    "CU": ([13.338,7.168,5.616,1.674],[3.583,0.247,11.397,64.813],1.191),
-    "ZN": ([14.074,7.032,5.165,2.410],[3.266,0.233,10.316,58.710],1.304),
-    "LA": ([20.578,19.599,11.373,3.287],[2.948,0.244,18.773,133.124],2.147),
-    "CE": ([21.167,19.770,11.851,3.330],[2.812,0.226,17.608,127.113],1.862),
-    "BA": ([20.336,19.297,10.888,5.480],[3.216,0.275,20.207,109.460],2.775),
-    "ZR": ([17.876,10.948,5.418,3.657],[1.276,11.916,0.118,87.663],2.069),
-}
-
-def f_atom(element, s):
-    """Atomic scattering factor, s = sin(theta)/lambda."""
-    key = element.upper()
-    if key not in CM:
-        return max(1.0, float(key[0].isalpha()))
-    a4, b4, c = CM[key]
-    s2 = s*s
-    return c + sum(ai*np.exp(-bi*s2) for ai, bi in zip(a4, b4))
-
-
-def structure_factor_sq(h, k, l, atoms, wl, tt):
-    """|F_hkl|^2 including Debye-Waller."""
-    theta = np.radians(tt/2)
-    s = np.sin(theta)/wl
-    Fr = Fi = 0.0
-    for at in atoms:
-        f   = f_atom(at["element"], s)
-        DW  = np.exp(-at["Biso"]*s*s)
-        phi = 2*np.pi*(h*at["x"] + k*at["y"] + l*at["z"])
-        Fr += at["occ"]*f*DW*np.cos(phi)
-        Fi += at["occ"]*f*DW*np.sin(phi)
-    return Fr*Fr + Fi*Fi
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PATTERN CALCULATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def calc_pattern(tt_arr, refs, pr, bg_c, atoms=None, mode="lebail"):
-    """Return (calculated_pattern, background_array)."""
-    bg   = chebyshev_bg(tt_arr, bg_c)
-    patt = np.zeros_like(tt_arr, dtype=float)
-    U, V, W = pr["U"], pr["V"], pr["W"]
-    eta0  = pr.get("eta0", 0.3)
-    scale = pr["scale"]
-    wl    = pr["wl"]
-    system= pr.get("system", "Cubic")
-
-    for ref in refs:
-        h, k, l, d, tt_pk = ref[0], ref[1], ref[2], ref[3], ref[4]
-        if not (tt_arr[0] <= tt_pk <= tt_arr[-1]):
-            continue
-        fwhm = caglioti_fwhm(tt_pk, U, V, W)
-        eta  = np.clip(eta0, 0, 1)
-        lp   = lp_factor(tt_pk)
-        mult = multiplicity(h, k, l, system)
-
-        if mode == "rietveld" and atoms:
-            F2 = structure_factor_sq(h, k, l, atoms, wl, tt_pk)
-        else:
-            F2 = ref[5]
-
-        prof   = pseudo_voigt(tt_arr, tt_pk, fwhm, eta)
-        patt  += scale * mult * lp * F2 * prof
-
-    return patt + bg, bg
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# R-FACTOR HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def r_factors(obs, calc, n_params=0):
-    w      = 1.0 / np.maximum(obs, 1)
-    Rwp    = 100*np.sqrt(np.sum(w*(obs-calc)**2) / np.sum(w*obs**2))
-    Rp     = 100*np.sum(np.abs(obs-calc)) / np.sum(obs)
-    chi2   = np.sum(w*(obs-calc)**2) / max(len(obs)-n_params, 1)
-    GoF    = np.sqrt(chi2)
-    return Rwp, Rp, chi2, GoF
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SYNTHETIC DATA GENERATOR
-# ─────────────────────────────────────────────────────────────────────────────
-
-PRESETS = {
-    "Si  (cubic Fd-3m, a=5.431 Å)":   dict(system="Cubic",  sg="Fd-3m",  a=5.4309, b=5.4309, c=5.4309, al=90,be=90,ga=90,
-                                            atoms=[{"element":"Si","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.46},
-                                                   {"element":"Si","x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.46}]),
-    "LaB6 (cubic Pm-3m, a=4.157 Å)":  dict(system="Cubic",  sg="Pm-3m",  a=4.1569, b=4.1569, c=4.1569, al=90,be=90,ga=90,
-                                            atoms=[{"element":"La","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.20},
-                                                   {"element":"B", "x":0.5,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.50},
-                                                   {"element":"B", "x":0.0,"y":0.5,"z":0.0,"occ":1.0,"Biso":0.50},
-                                                   {"element":"B", "x":0.0,"y":0.0,"z":0.5,"occ":1.0,"Biso":0.50}]),
-    "CeO2 (cubic Fm-3m, a=5.411 Å)":  dict(system="Cubic",  sg="Fm-3m",  a=5.4124, b=5.4124, c=5.4124, al=90,be=90,ga=90,
-                                            atoms=[{"element":"Ce","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.40},
-                                                   {"element":"O", "x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.60}]),
-    "Custom":                          dict(system="Cubic",  sg="P-1",    a=4.0, b=4.0, c=4.0, al=90,be=90,ga=90, atoms=[]),
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SESSION-STATE DEFAULTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def init_state():
-    defaults = dict(
-        refs=None, obs_tt=None, obs_I=None,
-        lb_result=None, rv_result=None,
-        atoms=[{"element":"Si","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.5},
-               {"element":"Si","x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.5}],
-    )
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-init_state()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.markdown("## ⚙️ Experiment Setup")
-
-    wl = st.number_input("Wavelength λ (Å)", 0.5, 3.0, 1.54056, 0.00001, "%.5f",
-                         help="CuKα1 = 1.54056 Å, MoKα1 = 0.70930 Å")
-
-    st.markdown("---")
-    st.markdown("### 📂 Data")
-    data_mode = st.radio("Source", ["Synthetic (preset)", "Upload XY file"], label_visibility="collapsed")
-
-    if data_mode == "Upload XY file":
-        uploaded = st.file_uploader("XY file (2θ  I per line)", type=["xy","dat","txt","csv"])
-        if uploaded:
-            lines = uploaded.read().decode().splitlines()
-            pts = []
-            for ln in lines:
-                ln = ln.strip()
-                if not ln or ln.startswith("#"):
-                    continue
-                parts = ln.split()
-                if len(parts) >= 2:
-                    try:
-                        pts.append((float(parts[0]), float(parts[1])))
-                    except ValueError:
-                        pass
-            if pts:
-                arr = np.array(pts)
-                st.session_state.obs_tt = arr[:, 0]
-                st.session_state.obs_I  = arr[:, 1]
-                st.success(f"Loaded {len(pts)} points")
-    else:
-        preset_key = st.selectbox("Preset material", list(PRESETS.keys()))
-        preset = PRESETS[preset_key]
-
-    st.markdown("---")
-    st.markdown("### 🔷 Unit Cell")
-
-    system_options = ["Cubic","Tetragonal","Orthorhombic","Hexagonal","Monoclinic","Triclinic"]
-    system = st.selectbox("Crystal system",
-                          system_options,
-                          index=system_options.index(preset.get("system","Cubic") if data_mode=="Synthetic (preset)" else "Cubic"))
-
-    c1, c2 = st.columns(2)
-    a = c1.number_input("a (Å)", 0.5, 30.0,
-                         preset.get("a",5.43) if data_mode=="Synthetic (preset)" else 5.43,
-                         0.0001, "%.4f")
-    if system == "Cubic":
-        b = a; c = a
-        c2.markdown(f"**b = c = a**")
-    elif system in ("Tetragonal","Hexagonal"):
-        b = a
-        c = c2.number_input("c (Å)", 0.5, 30.0,
-                              preset.get("c",5.43) if data_mode=="Synthetic (preset)" else 5.43,
-                              0.0001, "%.4f")
-        if system == "Tetragonal":
-            st.markdown("b = a")
-    else:
-        b = c2.number_input("b (Å)", 0.5, 30.0,
-                              preset.get("b",5.43) if data_mode=="Synthetic (preset)" else 5.43,
-                              0.0001, "%.4f")
-        c = c1.number_input("c (Å)", 0.5, 30.0,
-                              preset.get("c",5.43) if data_mode=="Synthetic (preset)" else 5.43,
-                              0.0001, "%.4f")
-
-    if system in ("Monoclinic","Triclinic"):
-        c3, c4, c5 = st.columns(3)
-        al = c3.number_input("α°", 1.0, 179.0,
-                              preset.get("al",90.0) if data_mode=="Synthetic (preset)" else 90.0,
-                              0.01, "%.2f")
-        be = c4.number_input("β°", 1.0, 179.0,
-                              preset.get("be",90.0) if data_mode=="Synthetic (preset)" else 90.0,
-                              0.01, "%.2f")
-        ga = c5.number_input("γ°", 1.0, 179.0,
-                              preset.get("ga",90.0) if data_mode=="Synthetic (preset)" else 90.0,
-                              0.01, "%.2f")
-    elif system == "Hexagonal":
-        al, be, ga = 90.0, 90.0, 120.0
-    else:
-        al = be = ga = 90.0
-
-    sg = st.text_input("Space group", preset.get("sg","P1") if data_mode=="Synthetic (preset)" else "P1")
-
-    st.markdown("---")
-    st.markdown("### 📐 2θ Range & Grid")
-    c1, c2 = st.columns(2)
-    tt_min = c1.number_input("Min 2θ (°)", 1.0, 170.0, 10.0, 0.5)
-    tt_max = c2.number_input("Max 2θ (°)", 10.0, 170.0, 100.0, 0.5)
-    n_pts  = st.slider("Grid points", 500, 5000, 2000, 100)
-
-    st.markdown("---")
-    st.markdown("### 📊 Profile Parameters")
-    U     = st.number_input("U (Caglioti)",  0.0,  5.0,   0.010, 0.001, "%.4f")
-    V     = st.number_input("V (Caglioti)", -1.0,  0.0,  -0.001, 0.001, "%.4f")
-    W     = st.number_input("W (Caglioti)",  1e-4, 5.0,   0.005, 0.001, "%.4f")
-    eta0  = st.number_input("η₀ (Lorentzian frac.)", 0.0, 1.0, 0.3, 0.01)
-    scale = st.number_input("Scale factor", 0.001, 1e9, 1000.0, 100.0)
-
-    st.markdown("---")
-    st.markdown("### 🌐 Background")
-    n_bg = st.slider("Chebyshev polynomial terms", 2, 8, 5)
-
-    st.markdown("---")
-    if st.button("🔄 Generate Reflections & Data", type="primary", use_container_width=True):
-        refs = gen_reflections(a, b, c, al, be, ga, system, sg, wl, tt_min, tt_max)
-        st.session_state.refs = refs
-        st.session_state.lb_result = None
-        st.session_state.rv_result = None
-
-        # Build base profile params
-        pr0 = dict(U=U, V=V, W=W, eta0=eta0, scale=scale, wl=wl, system=system)
-        bg0 = np.zeros(n_bg); bg0[0] = 80.0; bg0[1] = -20.0
-
-        tt_arr = np.linspace(tt_min, tt_max, n_pts)
-
-        if data_mode == "Synthetic (preset)":
-            # Use preset atoms
-            atoms_pr = PRESETS[preset_key].get("atoms", [])
-            if atoms_pr:
-                pat, _ = calc_pattern(tt_arr, refs, pr0, bg0,
-                                       atoms=atoms_pr, mode="rietveld")
-            else:
-                pat, _ = calc_pattern(tt_arr, refs, pr0, bg0, mode="lebail")
-            noise = np.random.default_rng(42).normal(
-                0, np.sqrt(np.abs(pat)+1)*0.04)
-            st.session_state.obs_tt = tt_arr
-            st.session_state.obs_I  = np.maximum(pat + noise, 0)
-        elif st.session_state.obs_tt is None:
-            st.warning("Upload a data file first, or use Synthetic mode.")
-
-        st.success(f"✅ {len(refs)} reflections generated")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN PANEL
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.title("🔬 Diffraction Analyser — Full Profile Refinement")
-
-# Convenience references
-refs   = st.session_state.refs
-obs_tt = st.session_state.obs_tt
-obs_I  = st.session_state.obs_I
-have_data = obs_tt is not None and obs_I is not None and refs is not None
-
-def bragg_ticks(refs, tt_min, tt_max, y0, dy=-0.04, max_ticks=300):
-    """Return plotly shapes + trace for tick marks."""
-    shapes, xs, ys = [], [], []
-    for ref in refs[:max_ticks]:
-        tt_pk = ref[4]
-        if tt_min <= tt_pk <= tt_max:
-            xs += [tt_pk, tt_pk, None]
-            ys += [y0, y0+dy, None]
-    return xs, ys
-
-# ─── TABS ───────────────────────────────────────────────────────────────────
-tab_data, tab_lb, tab_rv, tab_results = st.tabs(
-    ["📈 Pattern", "⚗️ Le Bail Fit", "🔬 Rietveld Fit", "📋 Results"])
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 1 — PATTERN VIEW
-# ════════════════════════════════════════════════════════════════════════════
-with tab_data:
-    if not have_data:
-        st.info("👈 Configure the sidebar and click **Generate Reflections & Data** to start.")
-    else:
-        ymax = obs_I.max()
-        tick_x, tick_y = bragg_ticks(refs, obs_tt[0], obs_tt[-1],
-                                      y0=ymax, dy=-ymax*0.04)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=obs_tt, y=obs_I, mode="lines",
-                                  name="Observed", line=dict(color="#1f77b4", width=1.2)))
-        if tick_x:
-            fig.add_trace(go.Scatter(x=tick_x, y=tick_y, mode="lines",
-                                      name="Bragg positions",
-                                      line=dict(color="red", width=1), showlegend=True,
-                                      hoverinfo="skip"))
-        fig.update_layout(
-            xaxis_title="2θ (°)", yaxis_title="Intensity (counts)",
-            template="plotly_white", height=480,
-            title=f"Observed Pattern — {len(refs)} reflections  |  λ = {wl:.5f} Å",
-            legend=dict(x=0.75, y=0.95))
-        st.plotly_chart(fig, use_container_width=True)
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Data points",     f"{len(obs_tt):,}")
-        col2.metric("Reflections",     f"{len(refs)}")
-        col3.metric("2θ range",        f"{obs_tt[0]:.1f}° – {obs_tt[-1]:.1f}°")
-
-        # HKL table
-        with st.expander("📄 Reflection list (first 60)"):
-            rows = [{"h":int(r[0]),"k":int(r[1]),"l":int(r[2]),
-                     "d (Å)":f"{r[3]:.4f}","2θ (°)":f"{r[4]:.3f}"}
-                    for r in refs[:60]]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 2 — LE BAIL
-# ════════════════════════════════════════════════════════════════════════════
-with tab_lb:
-    st.markdown("""
-    **Le Bail method** (Armel Le Bail, 1988) extracts integrated intensities |F_hkl|² without
-    an atomic model, via iterative profile fitting. Only the unit-cell, profile shape, and
-    background are refined.
-    """)
-
-    if not have_data:
-        st.warning("Generate data first (sidebar).")
-    else:
-        ctrl_col, plot_col = st.columns([1, 2.5])
-
-        with ctrl_col:
-            st.markdown("#### Refinement switches")
-            lb_scale   = st.checkbox("Scale",           True,  key="lb_sc")
-            lb_profile = st.checkbox("Profile U, V, W", True,  key="lb_prf")
-            lb_eta     = st.checkbox("Mixing η₀",       True,  key="lb_eta")
-            lb_bg      = st.checkbox("Background",      True,  key="lb_bg")
-            lb_iters   = st.number_input("Le Bail cycles", 20, 500, 100, 10)
-
-            run_lb = st.button("▶ Run Le Bail", type="primary", use_container_width=True)
-
-        # ── Le Bail algorithm ──────────────────────────────────────────────
-        if run_lb:
-            tt_arr  = obs_tt
-            obs     = obs_I
-            refs_lb = [list(r) for r in refs]  # local mutable copy
-
-            # Init intensities
-            for r in refs_lb:
-                r[5] = float(scale)
-
-            pr = dict(U=U, V=V, W=W, eta0=eta0, scale=scale, wl=wl, system=system)
-            bg = np.zeros(n_bg); bg[0] = float(np.percentile(obs, 3))
-
-            bar = st.progress(0, text="Running Le Bail…")
-
-            for cycle in range(int(lb_iters)):
-                # ① Current calculated pattern
-                calc, bgv = calc_pattern(tt_arr, refs_lb, pr, bg, mode="lebail")
-
-                # ② Distribute observed to each reflection (Le Bail formula)
-                for i, ref in enumerate(refs_lb):
-                    tt_pk = ref[4]
-                    fwhm  = caglioti_fwhm(tt_pk, pr["U"], pr["V"], pr["W"])
-                    p_k   = pseudo_voigt(tt_arr, tt_pk, fwhm, pr["eta0"])
-                    p_sum = p_k.sum()
-                    if p_sum < 1e-12:
-                        continue
-                    # share of calculated (excl. background)
-                    I_old  = ref[5]
-                    calc_nb = np.maximum(calc - bgv, 0)
-                    total_at_peak = np.dot(calc_nb, p_k) / (p_sum + 1e-12)
-                    obs_nb = np.maximum(obs - bgv, 0)
-                    I_new  = I_old * (np.dot(obs_nb, p_k) / (np.dot(calc_nb, p_k) + 1e-6))
-                    refs_lb[i][5] = max(I_new, 1e-3)
-
-                # ③ Every 5 cycles refine profile/BG with least-squares
-                if cycle % 5 == 4:
-                    x0_ls, lo_ls, hi_ls, keys_ls = [], [], [], []
-                    if lb_scale:
-                        x0_ls.append(pr["scale"]); lo_ls.append(1e-3); hi_ls.append(1e10); keys_ls.append("scale")
-                    if lb_profile:
-                        x0_ls += [pr["U"], pr["V"], pr["W"]]
-                        lo_ls  += [0.0, -2.0, 1e-4]; hi_ls += [20.0, 0.0, 20.0]
-                        keys_ls += ["U", "V", "W"]
-                    if lb_eta:
-                        x0_ls.append(pr["eta0"]); lo_ls.append(0.0); hi_ls.append(1.0); keys_ls.append("eta0")
-                    if lb_bg:
-                        x0_ls += list(bg)
-                        lo_ls  += [-1e6]*n_bg; hi_ls += [1e6]*n_bg
-                        keys_ls += [f"bg{j}" for j in range(n_bg)]
-
-                    if x0_ls:
-                        def _res(p):
-                            pr_t = pr.copy(); bg_t = bg.copy(); idx = 0
-                            for key in keys_ls:
-                                if key.startswith("bg"):
-                                    j = int(key[2:])
-                                    bg_t[j] = p[idx]
-                                else:
-                                    pr_t[key] = p[idx]
-                                idx += 1
-                            c, _ = calc_pattern(tt_arr, refs_lb, pr_t, bg_t, mode="lebail")
-                            w = 1.0/np.maximum(obs, 1)
-                            return np.sqrt(w)*(obs - c)
-
-                        try:
-                            res = least_squares(_res, x0_ls,
-                                                bounds=(lo_ls, hi_ls),
-                                                max_nfev=30, method="trf")
-                            idx = 0
-                            for key in keys_ls:
-                                if key.startswith("bg"):
-                                    bg[int(key[2:])] = res.x[idx]
-                                else:
-                                    pr[key] = res.x[idx]
-                                idx += 1
-                        except Exception:
-                            pass
-
-                bar.progress((cycle+1)/int(lb_iters),
-                             text=f"Le Bail cycle {cycle+1}/{lb_iters}")
-
-            bar.empty()
-
-            calc_f, bg_f = calc_pattern(tt_arr, refs_lb, pr, bg, mode="lebail")
-            Rwp, Rp, chi2, GoF = r_factors(obs, calc_f, len(x0_ls) if x0_ls else 0)
-
-            st.session_state.lb_result = dict(
-                refs=refs_lb, pr=pr, bg=bg, calc=calc_f, bgv=bg_f,
-                Rwp=Rwp, Rp=Rp, chi2=chi2, GoF=GoF)
-
-        # ── Plot ─────────────────────────────────────────────────────────────
-        with plot_col:
-            res = st.session_state.lb_result
-            if res:
-                tt_arr = obs_tt; obs = obs_I
-                calc   = res["calc"]; bgv = res["bgv"]
-                diff   = obs - calc
-
-                fig = make_subplots(rows=2, cols=1, row_heights=[0.72, 0.28],
-                                    shared_xaxes=True, vertical_spacing=0.03)
-
-                fig.add_trace(go.Scatter(x=tt_arr, y=obs,  mode="lines", name="Observed",
-                                         line=dict(color="#1f77b4",width=1.2)), row=1, col=1)
-                fig.add_trace(go.Scatter(x=tt_arr, y=calc, mode="lines", name="Calculated",
-                                         line=dict(color="#ff7f0e",width=1.8)), row=1, col=1)
-                fig.add_trace(go.Scatter(x=tt_arr, y=bgv,  mode="lines", name="Background",
-                                         line=dict(color="#9467bd",width=1,dash="dash")), row=1, col=1)
-
-                ymax_ = obs.max()
-                tx, ty = bragg_ticks(res["refs"], tt_arr[0], tt_arr[-1],
-                                      ymax_*1.02, -ymax_*0.04)
-                if tx:
-                    fig.add_trace(go.Scatter(x=tx, y=ty, mode="lines",
-                                              name="Bragg pos.",
-                                              line=dict(color="#2ca02c",width=1),
-                                              hoverinfo="skip"), row=1, col=1)
-
-                fig.add_trace(go.Scatter(x=tt_arr, y=diff, mode="lines", name="Difference",
-                                         line=dict(color="#d62728",width=1)), row=2, col=1)
-                fig.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
-
-                fig.update_layout(
-                    height=520, template="plotly_white",
-                    title=f"Le Bail  |  Rwp = {res['Rwp']:.2f}%  Rp = {res['Rp']:.2f}%  χ² = {res['chi2']:.3f}",
-                    xaxis2_title="2θ (°)",
-                    yaxis_title="Intensity",
-                    yaxis2_title="Δ",
-                    legend=dict(x=0.75, y=0.95),
-                    margin=dict(t=50))
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Metrics
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Rwp", f"{res['Rwp']:.2f}%")
-                m2.metric("Rp",  f"{res['Rp']:.2f}%")
-                m3.metric("χ²",  f"{res['chi2']:.3f}")
-                m4.metric("GoF", f"{res['GoF']:.3f}")
-
-                pr_ = res["pr"]
-                p1, p2, p3, p4, p5 = st.columns(5)
-                p1.metric("Scale", f"{pr_['scale']:.1f}")
-                p2.metric("U",     f"{pr_['U']:.5f}")
-                p3.metric("V",     f"{pr_['V']:.5f}")
-                p4.metric("W",     f"{pr_['W']:.5f}")
-                p5.metric("η₀",    f"{pr_['eta0']:.4f}")
-            else:
-                st.info("← Configure and click **Run Le Bail**")
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 3 — RIETVELD
-# ════════════════════════════════════════════════════════════════════════════
-with tab_rv:
-    st.markdown("""
-    **Rietveld refinement** fits the full crystal structure — atomic positions, occupancies,
-    and Debye-Waller factors — together with profile and background parameters.
-    """)
-
-    if not have_data:
-        st.warning("Generate data first (sidebar).")
-    else:
-        ctrl_col, plot_col = st.columns([1, 2.5])
-
-        with ctrl_col:
-            st.markdown("#### Atomic Structure")
-
-            # Atom table editor
-            if data_mode == "Synthetic (preset)" and st.button("Load preset atoms", use_container_width=True):
-                preset_atoms = PRESETS[preset_key].get("atoms", [])
-                if preset_atoms:
-                    st.session_state.atoms = [dict(a) for a in preset_atoms]
-
-            atoms_in = st.session_state.atoms
-            updated_atoms = []
-            for i, at in enumerate(atoms_in):
-                with st.expander(f"Atom {i+1}: {at['element']}", expanded=i < 3):
-                    el  = st.text_input("Element", at["element"], key=f"el_{i}")
-                    c1o, c2o, c3o = st.columns(3)
-                    x   = c1o.number_input("x", 0.0, 1.0, at["x"],   0.001, "%.4f", key=f"ax_{i}")
-                    y   = c2o.number_input("y", 0.0, 1.0, at["y"],   0.001, "%.4f", key=f"ay_{i}")
-                    z   = c3o.number_input("z", 0.0, 1.0, at["z"],   0.001, "%.4f", key=f"az_{i}")
-                    o1, o2 = st.columns(2)
-                    occ  = o1.number_input("Occ", 0.0, 1.0, at["occ"], 0.01,  "%.3f", key=f"oc_{i}")
-                    Biso = o2.number_input("Biso", 0.0, 20.0, at["Biso"], 0.01, "%.3f", key=f"Bs_{i}")
-                    updated_atoms.append({"element":el,"x":x,"y":y,"z":z,"occ":occ,"Biso":Biso})
-            st.session_state.atoms = updated_atoms
-
-            ca, cr = st.columns(2)
-            if ca.button("➕ Atom", use_container_width=True):
-                st.session_state.atoms.append({"element":"O","x":0.5,"y":0.5,"z":0.5,"occ":1.0,"Biso":1.0})
-                st.rerun()
-            if cr.button("➖ Last", use_container_width=True) and len(st.session_state.atoms) > 1:
-                st.session_state.atoms.pop()
-                st.rerun()
-
-            st.markdown("#### Refinement switches")
-            rv_scale   = st.checkbox("Scale",           True,  key="rv_sc")
-            rv_profile = st.checkbox("Profile U, V, W", True,  key="rv_prf")
-            rv_eta     = st.checkbox("Mixing η₀",       False, key="rv_eta")
-            rv_bg      = st.checkbox("Background",      True,  key="rv_bg")
-            rv_pos     = st.checkbox("Atomic x, y, z",  False, key="rv_pos",
-                                     help="Refine fractional coordinates")
-            rv_Biso    = st.checkbox("Biso",            True,  key="rv_Biso")
-            rv_occ     = st.checkbox("Occupancies",     False, key="rv_occ")
-
-            run_rv = st.button("▶ Run Rietveld", type="primary", use_container_width=True)
-
-        # ── Rietveld algorithm ────────────────────────────────────────────
-        if run_rv:
-            atoms_work = [dict(a) for a in st.session_state.atoms]
-            tt_arr = obs_tt; obs = obs_I
-
-            # Seed from Le Bail if available
-            if st.session_state.lb_result:
-                pr = dict(st.session_state.lb_result["pr"])
-                bg = st.session_state.lb_result["bg"].copy()
-            else:
-                pr = dict(U=U, V=V, W=W, eta0=eta0, scale=scale, wl=wl, system=system)
-                bg = np.zeros(n_bg); bg[0] = float(np.percentile(obs, 3))
-
-            # Pack / unpack helpers
-            def pack(pr_, bg_, atl):
-                p = []
-                if rv_scale:   p.append(pr_["scale"])
-                if rv_profile: p += [pr_["U"], pr_["V"], pr_["W"]]
-                if rv_eta:     p.append(pr_["eta0"])
-                if rv_bg:      p += list(bg_)
-                for at in atl:
-                    if rv_pos:  p += [at["x"], at["y"], at["z"]]
-                    if rv_Biso: p.append(at["Biso"])
-                    if rv_occ:  p.append(at["occ"])
-                return np.array(p, dtype=float)
-
-            def unpack(p, pr_, bg_, atl):
-                pr_  = dict(pr_); bg_ = bg_.copy()
-                atl  = [dict(a) for a in atl]
-                idx  = 0
-                if rv_scale:   pr_["scale"] = max(p[idx], 1e-6); idx+=1
-                if rv_profile: pr_["U"]=max(p[idx],0); idx+=1; pr_["V"]=p[idx]; idx+=1; pr_["W"]=max(p[idx],1e-4); idx+=1
-                if rv_eta:     pr_["eta0"] = np.clip(p[idx],0,1); idx+=1
-                if rv_bg:      bg_[:]=p[idx:idx+n_bg]; idx+=n_bg
-                for j in range(len(atl)):
-                    if rv_pos:  atl[j]["x"]=p[idx]%1; idx+=1; atl[j]["y"]=p[idx]%1; idx+=1; atl[j]["z"]=p[idx]%1; idx+=1
-                    if rv_Biso: atl[j]["Biso"]=max(p[idx],0.01); idx+=1
-                    if rv_occ:  atl[j]["occ"]=np.clip(p[idx],0.01,1); idx+=1
-                return pr_, bg_, atl
-
-            def residuals_rv(p):
-                pr_t, bg_t, at_t = unpack(p, pr, bg, atoms_work)
-                cal, _ = calc_pattern(tt_arr, refs, pr_t, bg_t, atoms=at_t, mode="rietveld")
-                w = 1.0/np.maximum(obs, 1)
-                return np.sqrt(w)*(obs - cal)
-
-            x0 = pack(pr, bg, atoms_work)
-            lo, hi = [], []
-            if rv_scale:   lo.append(1e-6);  hi.append(1e10)
-            if rv_profile: lo+=[0,-2,1e-4];  hi+=[20,0,20]
-            if rv_eta:     lo.append(0);     hi.append(1)
-            if rv_bg:      lo+=[-1e6]*n_bg;  hi+=[1e6]*n_bg
-            for _ in atoms_work:
-                if rv_pos:  lo+=[0,0,0];    hi+=[1,1,1]
-                if rv_Biso: lo.append(0.01); hi.append(30)
-                if rv_occ:  lo.append(0.01); hi.append(1)
-
-            with st.spinner("Running Rietveld refinement…"):
-                try:
-                    res_ls = least_squares(residuals_rv, x0, bounds=(lo, hi),
-                                           max_nfev=1000, ftol=1e-10, xtol=1e-10,
-                                           method="trf")
-                    pr_f, bg_f, at_f = unpack(res_ls.x, pr, bg, atoms_work)
-                except Exception as e:
-                    st.error(f"Refinement error: {e}")
-                    pr_f, bg_f, at_f = pr, bg, atoms_work
-
-            calc_f, bgv_f = calc_pattern(tt_arr, refs, pr_f, bg_f,
-                                          atoms=at_f, mode="rietveld")
-            Rwp, Rp, chi2, GoF = r_factors(obs, calc_f, len(x0))
-
-            st.session_state.rv_result = dict(
-                pr=pr_f, bg=bg_f, atoms=at_f,
-                calc=calc_f, bgv=bgv_f,
-                Rwp=Rwp, Rp=Rp, chi2=chi2, GoF=GoF)
-
-        # ── Plot ─────────────────────────────────────────────────────────────
-        with plot_col:
-            res = st.session_state.rv_result
-            if res:
-                tt_arr = obs_tt; obs = obs_I
-                calc   = res["calc"]; bgv = res["bgv"]
-                diff   = obs - calc
-
-                fig = make_subplots(rows=2, cols=1, row_heights=[0.72, 0.28],
-                                    shared_xaxes=True, vertical_spacing=0.03)
-
-                fig.add_trace(go.Scatter(x=tt_arr, y=obs,  mode="lines", name="Observed",
-                                         line=dict(color="#1f77b4",width=1.2)), row=1, col=1)
-                fig.add_trace(go.Scatter(x=tt_arr, y=calc, mode="lines", name="Calculated",
-                                         line=dict(color="#ff7f0e",width=1.8)), row=1, col=1)
-                fig.add_trace(go.Scatter(x=tt_arr, y=bgv,  mode="lines", name="Background",
-                                         line=dict(color="#9467bd",width=1,dash="dash")), row=1, col=1)
-
-                ymax_ = obs.max()
-                tx, ty = bragg_ticks(refs, tt_arr[0], tt_arr[-1],
-                                      ymax_*1.02, -ymax_*0.04)
-                if tx:
-                    fig.add_trace(go.Scatter(x=tx, y=ty, mode="lines",
-                                              name="Bragg pos.",
-                                              line=dict(color="#2ca02c",width=1),
-                                              hoverinfo="skip"), row=1, col=1)
-
-                fig.add_trace(go.Scatter(x=tt_arr, y=diff, mode="lines", name="Difference",
-                                         line=dict(color="#d62728",width=1)), row=2, col=1)
-                fig.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
-
-                fig.update_layout(
-                    height=520, template="plotly_white",
-                    title=(f"Rietveld  |  Rwp = {res['Rwp']:.2f}%  "
-                           f"Rp = {res['Rp']:.2f}%  χ² = {res['chi2']:.3f}  GoF = {res['GoF']:.3f}"),
-                    xaxis2_title="2θ (°)",
-                    yaxis_title="Intensity",
-                    yaxis2_title="Δ",
-                    legend=dict(x=0.75, y=0.95),
-                    margin=dict(t=50))
-                st.plotly_chart(fig, use_container_width=True)
-
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Rwp", f"{res['Rwp']:.2f}%")
-                m2.metric("Rp",  f"{res['Rp']:.2f}%")
-                m3.metric("χ²",  f"{res['chi2']:.3f}")
-                m4.metric("GoF", f"{res['GoF']:.3f}")
-
-                pr_ = res["pr"]
-                p1,p2,p3,p4,p5 = st.columns(5)
-                p1.metric("Scale", f"{pr_['scale']:.2f}")
-                p2.metric("U",     f"{pr_['U']:.5f}")
-                p3.metric("V",     f"{pr_['V']:.5f}")
-                p4.metric("W",     f"{pr_['W']:.5f}")
-                p5.metric("η₀",    f"{pr_['eta0']:.4f}")
-
-                st.markdown("**Refined atoms:**")
-                st.dataframe(pd.DataFrame(res["atoms"]), use_container_width=True)
-            else:
-                st.info("← Add atoms and click **Run Rietveld**")
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 4 — RESULTS SUMMARY
-# ════════════════════════════════════════════════════════════════════════════
-with tab_results:
-    st.markdown("## Results Summary")
-
-    lb = st.session_state.lb_result
-    rv = st.session_state.rv_result
-
-    # ── R-factor comparison ───────────────────────────────────────────────
-    methods, Rwps, Rps, chi2s, GoFs = [], [], [], [], []
-    if lb:
-        methods.append("Le Bail")
-        Rwps.append(lb["Rwp"]); Rps.append(lb["Rp"])
-        chi2s.append(lb["chi2"]); GoFs.append(lb["GoF"])
-    if rv:
-        methods.append("Rietveld")
-        Rwps.append(rv["Rwp"]); Rps.append(rv["Rp"])
-        chi2s.append(rv["chi2"]); GoFs.append(rv["GoF"])
-
-    if methods:
-        fig_r = go.Figure()
-        fig_r.add_trace(go.Bar(x=methods, y=Rwps, name="Rwp (%)", marker_color="#1f77b4"))
-        fig_r.add_trace(go.Bar(x=methods, y=Rps,  name="Rp (%)",  marker_color="#ff7f0e"))
-        fig_r.update_layout(barmode="group", template="plotly_white",
-                             title="R-factor comparison", height=300,
-                             yaxis_title="R (%)", legend=dict(x=0.8, y=0.95))
-        st.plotly_chart(fig_r, use_container_width=True)
-
-        summary_df = pd.DataFrame({
-            "Method": methods, "Rwp (%)": [f"{v:.3f}" for v in Rwps],
-            "Rp (%)":  [f"{v:.3f}" for v in Rps],
-            "χ²":      [f"{v:.4f}" for v in chi2s],
-            "GoF":     [f"{v:.4f}" for v in GoFs],
-        })
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Run Le Bail and/or Rietveld to see results here.")
-
-    # ── Extracted Le Bail intensities ─────────────────────────────────────
-    if lb and lb.get("refs"):
-        st.markdown("### Le Bail — Extracted |F²| (first 80 reflections)")
-        rows = []
-        for r in lb["refs"][:80]:
-            rows.append({"h":int(r[0]),"k":int(r[1]),"l":int(r[2]),
-                         "d (Å)":round(r[3],4),"2θ (°)":round(r[4],3),
-                         "|F²| (arb.)":round(r[5],2)})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=300)
-
-    # ── Refined atom table ────────────────────────────────────────────────
-    if rv and rv.get("atoms"):
-        st.markdown("### Rietveld — Refined Atomic Parameters")
-        st.dataframe(pd.DataFrame(rv["atoms"]).round(5), use_container_width=True)
-
-    # ── Exports ──────────────────────────────────────────────────────────
-    st.markdown("### 💾 Export")
-    ec1, ec2, ec3 = st.columns(3)
-
-    if ec1.button("📥 Export Pattern CSV") and have_data:
-        df_exp = pd.DataFrame({"2theta_deg": obs_tt, "observed": obs_I})
-        if lb:
-            df_exp["LeBail_calc"]  = lb["calc"]
-            df_exp["LeBail_bg"]    = lb["bgv"]
-            df_exp["LeBail_diff"]  = obs_I - lb["calc"]
-        if rv:
-            df_exp["Rietveld_calc"] = rv["calc"]
-            df_exp["Rietveld_bg"]   = rv["bgv"]
-            df_exp["Rietveld_diff"] = obs_I - rv["calc"]
-        ec1.download_button("⬇ Download", df_exp.to_csv(index=False),
-                            "diffraction_pattern.csv", "text/csv")
-
-    if ec2.button("📥 Export Reflections CSV") and refs is not None:
-        rows_e = [{"h":int(r[0]),"k":int(r[1]),"l":int(r[2]),
-                   "d_Ang":round(r[3],5),"2theta_deg":round(r[4],4),
-                   "LeBail_I2":round(r[5],3) if len(r)>5 else None}
-                  for r in (lb["refs"] if lb else refs)]
-        ec2.download_button("⬇ Download", pd.DataFrame(rows_e).to_csv(index=False),
-                            "reflections.csv", "text/csv")
-
-    if ec3.button("📥 Export Atoms CSV") and rv and rv.get("atoms"):
-        ec3.download_button("⬇ Download", pd.DataFrame(rv["atoms"]).to_csv(index=False),
-                            "refined_atoms.csv", "text/csv")
+# Data from Main Page
+main_df = st.session_state.get('main_df')
+comp_df = st.session_state.get('comp_df')
+cif_data = st.session_state.get('cif_data')
+
+if main_df is None:
+    st.warning("Main XRD pattern missing. Please upload it on the Main Page.")
+    st.stop()
+
+     1|﻿"""
+     2|Diffraction Analyser — Full Profile Refinement (Le Bail + Rietveld)
+     3|Run with:  streamlit run diffraction_analyser.py
+     4|Requires:  pip install streamlit numpy scipy plotly pandas
+     5|"""
+     6|
+     7|import streamlit as st
+     8|import numpy as np
+     9|import plotly.graph_objects as go
+    10|from plotly.subplots import make_subplots
+    11|from scipy.optimize import least_squares
+    12|import pandas as pd
+    13|import warnings
+    14|
+    15|warnings.filterwarnings("ignore")
+    16|
+    17|st.set_page_config(
+    18|    page_title="Diffraction Analyser",
+    19|    page_icon="🔬",
+    20|    layout="wide",
+    21|    initial_sidebar_state="expanded",
+    22|)
+    23|
+    24|# ─────────────────────────────────────────────────────────────────────────────
+    25|# CSS
+    26|# ─────────────────────────────────────────────────────────────────────────────
+    27|st.markdown("""
+    28|<style>
+    29|[data-testid="stMetricValue"] { font-size: 1.3rem; }
+    30|.block-container { padding-top: 1rem; }
+    31|.stTabs [data-baseweb="tab"] { font-size: 0.95rem; font-weight: 600; }
+    32|h1 { font-size: 1.8rem !important; }
+    33|h2 { font-size: 1.2rem !important; }
+    34|h3 { font-size: 1.05rem !important; }
+    35|</style>
+    36|""", unsafe_allow_html=True)
+    37|
+    38|# ─────────────────────────────────────────────────────────────────────────────
+    39|# CRYSTALLOGRAPHY UTILITIES
+    40|# ─────────────────────────────────────────────────────────────────────────────
+    41|
+    42|def d_spacing(h, k, l, a, b, c, alpha_deg, beta_deg, gamma_deg, system):
+    43|    """Return d-spacing (Å) for a given reflection and crystal system."""
+    44|    ar, br, gr = (np.radians(x) for x in (alpha_deg, beta_deg, gamma_deg))
+    45|    h, k, l = float(h), float(k), float(l)
+    46|
+    47|    if system == "Cubic":
+    48|        inv = (h**2 + k**2 + l**2) / a**2
+    49|    elif system == "Tetragonal":
+    50|        inv = (h**2 + k**2) / a**2 + l**2 / c**2
+    51|    elif system == "Orthorhombic":
+    52|        inv = h**2/a**2 + k**2/b**2 + l**2/c**2
+    53|    elif system == "Hexagonal":
+    54|        inv = 4/3*(h**2 + h*k + k**2)/a**2 + l**2/c**2
+    55|    elif system == "Monoclinic":
+    56|        sb = np.sin(br)
+    57|        inv = (1/sb**2)*(h**2/a**2 + k**2*sb**2/b**2 + l**2/c**2
+    58|                         - 2*h*l*np.cos(br)/(a*c))
+    59|    else:  # Triclinic
+    60|        ca, cb, cg = np.cos(ar), np.cos(br), np.cos(gr)
+    61|        sa, sb, sg = np.sin(ar), np.sin(br), np.sin(gr)
+    62|        V = a*b*c*np.sqrt(1 - ca**2 - cb**2 - cg**2 + 2*ca*cb*cg)
+    63|        if V < 1e-10:
+    64|            return None
+    65|        inv = (b**2*c**2*sa**2*h**2 + a**2*c**2*sb**2*k**2 + a**2*b**2*sg**2*l**2
+    66|               + 2*a*b*c**2*(ca*cb-cg)*h*k
+    67|               + 2*a**2*b*c*(cb*cg-ca)*k*l
+    68|               + 2*a*b**2*c*(ca*cg-cb)*h*l) / V**2
+    69|
+    70|    return None if inv <= 1e-12 else 1.0/np.sqrt(inv)
+    71|
+    72|
+    73|def is_absent(h, k, l, sg):
+    74|    """Very simplified systematic absence check based on lattice centering."""
+    75|    h, k, l = int(h), int(k), int(l)
+    76|    sg = sg.upper().replace(" ", "")
+    77|    if sg.startswith("I") and (h+k+l) % 2 != 0:
+    78|        return True
+    79|    if sg.startswith("F"):
+    80|        parities = {h%2, k%2, l%2}
+    81|        if len(parities) > 1:
+    82|            return True
+    83|    if sg.startswith("C") and (h+k) % 2 != 0:
+    84|        return True
+    85|    if sg.startswith("A") and (k+l) % 2 != 0:
+    86|        return True
+    87|    if sg.startswith("B") and (h+l) % 2 != 0:
+    88|        return True
+    89|    # FD screw axes (very simplified)
+    90|    if "FD" in sg or "Fd" in sg.replace("-",""):
+    91|        if h == 0 and k == 0 and l % 4 != 0:
+    92|            return True
+    93|    return False
+    94|
+    95|
+    96|def gen_reflections(a, b, c, alpha, beta, gamma, system, sg, wl, tt_min, tt_max):
+    97|    """Return list of (h,k,l,d,2theta,I_lb) for all allowed reflections."""
+    98|    d_min = wl / (2*np.sin(np.radians(tt_max/2)))
+    99|    d_max = wl / (2*np.sin(np.radians(max(tt_min, 0.5)/2)))
+   100|    mh = int(2*a/d_min)+2
+   101|    mk = int(2*b/d_min)+2
+   102|    ml = int(2*c/d_min)+2
+   103|
+   104|    seen = {}
+   105|    for h in range(-mh, mh+1):
+   106|        for k in range(-mk, mk+1):
+   107|            for l in range(-ml, ml+1):
+   108|                if h == k == l == 0:
+   109|                    continue
+   110|                if is_absent(h, k, l, sg):
+   111|                    continue
+   112|                d = d_spacing(h, k, l, a, b, c, alpha, beta, gamma, system)
+   113|                if d is None or not (d_min <= d <= d_max):
+   114|                    continue
+   115|                tt = 2*np.degrees(np.arcsin(np.clip(wl/(2*d), -1, 1)))
+   116|                key = round(tt, 4)
+   117|                if key not in seen:
+   118|                    seen[key] = [h, k, l, d, tt, 1000.0]
+   119|    refs = sorted(seen.values(), key=lambda r: r[4])
+   120|    return refs
+   121|
+   122|
+   123|# ─────────────────────────────────────────────────────────────────────────────
+   124|# PROFILE & BACKGROUND FUNCTIONS
+   125|# ─────────────────────────────────────────────────────────────────────────────
+   126|
+   127|def pseudo_voigt(x, x0, fwhm, eta):
+   128|    """Normalised pseudo-Voigt profile."""
+   129|    eta = np.clip(eta, 0, 1)
+   130|    fwhm = max(fwhm, 1e-6)
+   131|    sigma = fwhm / (2*np.sqrt(2*np.log(2)))
+   132|    G = np.exp(-0.5*((x-x0)/sigma)**2)
+   133|    L = 1.0 / (1 + ((x-x0)/(fwhm/2))**2)
+   134|    return eta*L + (1-eta)*G
+   135|
+   136|
+   137|def caglioti_fwhm(tt, U, V, W):
+   138|    th = np.radians(tt/2)
+   139|    tan_th = np.tan(th)
+   140|    return max(np.sqrt(max(U*tan_th**2 + V*tan_th + W, 1e-8)), 0.005)
+   141|
+   142|
+   143|def chebyshev_bg(tt, coeffs):
+   144|    x = 2*(tt - tt.min())/(tt.max()-tt.min()) - 1
+   145|    T = [np.ones_like(x), x, 2*x**2-1, 4*x**3-3*x,
+   146|         8*x**4-8*x**2+1, 16*x**5-20*x**3+5*x,
+   147|         32*x**6-48*x**4+18*x**2-1, 64*x**7-112*x**5+56*x**3-7*x]
+   148|    result = np.zeros_like(x)
+   149|    for i, c in enumerate(coeffs):
+   150|        result += c * T[i]
+   151|    return result
+   152|
+   153|
+   154|def lp_factor(tt):
+   155|    th = np.radians(tt/2)
+   156|    cos2 = np.cos(np.radians(tt))**2
+   157|    return (1+cos2) / (np.sin(th)**2 * np.cos(th) + 1e-12)
+   158|
+   159|
+   160|def multiplicity(h, k, l, system):
+   161|    h, k, l = abs(int(h)), abs(int(k)), abs(int(l))
+   162|    zeros = sum(x == 0 for x in [h, k, l])
+   163|    if system == "Cubic":
+   164|        eq = len({h, k, l})
+   165|        if eq == 1:    return 8
+   166|        if eq == 2:    return 24
+   167|        return 48
+   168|    elif system == "Tetragonal":
+   169|        if h == 0 and k == 0: return 2
+   170|        base = 4 if h == k else 8
+   171|        return base if l == 0 else base*2
+   172|    elif system == "Hexagonal":
+   173|        if h == 0 and k == 0: return 2
+   174|        return 12 if l != 0 else 6
+   175|    elif system == "Orthorhombic":
+   176|        return 2**(3-zeros)*2
+   177|    return max(2**(3-zeros), 1)
+   178|
+   179|
+   180|# ─────────────────────────────────────────────────────────────────────────────
+   181|# ATOMIC SCATTERING FACTORS (Cromer-Mann)
+   182|# ─────────────────────────────────────────────────────────────────────────────
+   183|
+   184|CM = {
+   185|    "H":  ([0.4899,0.2620,0.1968,0.0499],[20.659,7.740,49.552,2.202],0.001),
+   186|    "C":  ([2.310,1.020,1.589,0.865],[20.844,10.208,0.569,51.651],0.216),
+   187|    "N":  ([12.213,3.132,2.013,1.166],[0.006,9.893,28.997,0.583],-11.529),
+   188|    "O":  ([3.049,2.287,1.546,0.867],[13.277,5.701,0.324,32.909],0.251),
+   189|    "Na": ([4.763,3.174,1.267,1.113],[3.285,8.842,0.314,129.424],0.676),
+   190|    "MG": ([5.420,2.174,1.227,2.307],[2.828,79.261,0.381,7.194],0.858),
+   191|    "AL": ([6.420,1.900,1.594,1.965],[3.039,0.743,31.547,85.089],1.115),
+   192|    "SI": ([6.292,3.035,1.989,1.541],[2.439,32.334,0.679,81.694],1.141),
+   193|    "CA": ([8.627,7.387,1.590,1.021],[10.442,0.660,85.748,178.437],1.375),
+   194|    "TI": ([9.760,7.359,1.699,1.902],[7.851,0.500,35.634,116.105],1.281),
+   195|    "FE": ([11.770,7.357,3.522,2.305],[4.761,0.307,15.354,76.881],1.037),
+   196|    "CU": ([13.338,7.168,5.616,1.674],[3.583,0.247,11.397,64.813],1.191),
+   197|    "ZN": ([14.074,7.032,5.165,2.410],[3.266,0.233,10.316,58.710],1.304),
+   198|    "LA": ([20.578,19.599,11.373,3.287],[2.948,0.244,18.773,133.124],2.147),
+   199|    "CE": ([21.167,19.770,11.851,3.330],[2.812,0.226,17.608,127.113],1.862),
+   200|    "BA": ([20.336,19.297,10.888,5.480],[3.216,0.275,20.207,109.460],2.775),
+   201|    "ZR": ([17.876,10.948,5.418,3.657],[1.276,11.916,0.118,87.663],2.069),
+   202|}
+   203|
+   204|def f_atom(element, s):
+   205|    """Atomic scattering factor, s = sin(theta)/lambda."""
+   206|    key = element.upper()
+   207|    if key not in CM:
+   208|        return max(1.0, float(key[0].isalpha()))
+   209|    a4, b4, c = CM[key]
+   210|    s2 = s*s
+   211|    return c + sum(ai*np.exp(-bi*s2) for ai, bi in zip(a4, b4))
+   212|
+   213|
+   214|def structure_factor_sq(h, k, l, atoms, wl, tt):
+   215|    """|F_hkl|^2 including Debye-Waller."""
+   216|    theta = np.radians(tt/2)
+   217|    s = np.sin(theta)/wl
+   218|    Fr = Fi = 0.0
+   219|    for at in atoms:
+   220|        f   = f_atom(at["element"], s)
+   221|        DW  = np.exp(-at["Biso"]*s*s)
+   222|        phi = 2*np.pi*(h*at["x"] + k*at["y"] + l*at["z"])
+   223|        Fr += at["occ"]*f*DW*np.cos(phi)
+   224|        Fi += at["occ"]*f*DW*np.sin(phi)
+   225|    return Fr*Fr + Fi*Fi
+   226|
+   227|
+   228|# ─────────────────────────────────────────────────────────────────────────────
+   229|# PATTERN CALCULATION
+   230|# ─────────────────────────────────────────────────────────────────────────────
+   231|
+   232|def calc_pattern(tt_arr, refs, pr, bg_c, atoms=None, mode="lebail"):
+   233|    """Return (calculated_pattern, background_array)."""
+   234|    bg   = chebyshev_bg(tt_arr, bg_c)
+   235|    patt = np.zeros_like(tt_arr, dtype=float)
+   236|    U, V, W = pr["U"], pr["V"], pr["W"]
+   237|    eta0  = pr.get("eta0", 0.3)
+   238|    scale = pr["scale"]
+   239|    wl    = pr["wl"]
+   240|    system= pr.get("system", "Cubic")
+   241|
+   242|    for ref in refs:
+   243|        h, k, l, d, tt_pk = ref[0], ref[1], ref[2], ref[3], ref[4]
+   244|        if not (tt_arr[0] <= tt_pk <= tt_arr[-1]):
+   245|            continue
+   246|        fwhm = caglioti_fwhm(tt_pk, U, V, W)
+   247|        eta  = np.clip(eta0, 0, 1)
+   248|        lp   = lp_factor(tt_pk)
+   249|        mult = multiplicity(h, k, l, system)
+   250|
+   251|        if mode == "rietveld" and atoms:
+   252|            F2 = structure_factor_sq(h, k, l, atoms, wl, tt_pk)
+   253|        else:
+   254|            F2 = ref[5]
+   255|
+   256|        prof   = pseudo_voigt(tt_arr, tt_pk, fwhm, eta)
+   257|        patt  += scale * mult * lp * F2 * prof
+   258|
+   259|    return patt + bg, bg
+   260|
+   261|
+   262|# ─────────────────────────────────────────────────────────────────────────────
+   263|# R-FACTOR HELPERS
+   264|# ─────────────────────────────────────────────────────────────────────────────
+   265|
+   266|def r_factors(obs, calc, n_params=0):
+   267|    w      = 1.0 / np.maximum(obs, 1)
+   268|    Rwp    = 100*np.sqrt(np.sum(w*(obs-calc)**2) / np.sum(w*obs**2))
+   269|    Rp     = 100*np.sum(np.abs(obs-calc)) / np.sum(obs)
+   270|    chi2   = np.sum(w*(obs-calc)**2) / max(len(obs)-n_params, 1)
+   271|    GoF    = np.sqrt(chi2)
+   272|    return Rwp, Rp, chi2, GoF
+   273|
+   274|
+   275|# ─────────────────────────────────────────────────────────────────────────────
+   276|# SYNTHETIC DATA GENERATOR
+   277|# ─────────────────────────────────────────────────────────────────────────────
+   278|
+   279|PRESETS = {
+   280|    "Si  (cubic Fd-3m, a=5.431 Å)":   dict(system="Cubic",  sg="Fd-3m",  a=5.4309, b=5.4309, c=5.4309, al=90,be=90,ga=90,
+   281|                                            atoms=[{"element":"Si","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.46},
+   282|                                                   {"element":"Si","x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.46}]),
+   283|    "LaB6 (cubic Pm-3m, a=4.157 Å)":  dict(system="Cubic",  sg="Pm-3m",  a=4.1569, b=4.1569, c=4.1569, al=90,be=90,ga=90,
+   284|                                            atoms=[{"element":"La","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.20},
+   285|                                                   {"element":"B", "x":0.5,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.50},
+   286|                                                   {"element":"B", "x":0.0,"y":0.5,"z":0.0,"occ":1.0,"Biso":0.50},
+   287|                                                   {"element":"B", "x":0.0,"y":0.0,"z":0.5,"occ":1.0,"Biso":0.50}]),
+   288|    "CeO2 (cubic Fm-3m, a=5.411 Å)":  dict(system="Cubic",  sg="Fm-3m",  a=5.4124, b=5.4124, c=5.4124, al=90,be=90,ga=90,
+   289|                                            atoms=[{"element":"Ce","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.40},
+   290|                                                   {"element":"O", "x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.60}]),
+   291|    "Custom":                          dict(system="Cubic",  sg="P-1",    a=4.0, b=4.0, c=4.0, al=90,be=90,ga=90, atoms=[]),
+   292|}
+   293|
+   294|
+   295|# ─────────────────────────────────────────────────────────────────────────────
+   296|# SESSION-STATE DEFAULTS
+   297|# ─────────────────────────────────────────────────────────────────────────────
+   298|
+   299|def init_state():
+   300|    defaults = dict(
+   301|        refs=None, obs_tt=None, obs_I=None,
+   302|        lb_result=None, rv_result=None,
+   303|        atoms=[{"element":"Si","x":0.0,"y":0.0,"z":0.0,"occ":1.0,"Biso":0.5},
+   304|               {"element":"Si","x":0.25,"y":0.25,"z":0.25,"occ":1.0,"Biso":0.5}],
+   305|    )
+   306|    for k, v in defaults.items():
+   307|        if k not in st.session_state:
+   308|            st.session_state[k] = v
+   309|
+   310|init_state()
+   311|
+   312|# ─────────────────────────────────────────────────────────────────────────────
+   313|# SIDEBAR
+   314|# ─────────────────────────────────────────────────────────────────────────────
+   315|
+   316|with st.sidebar:
+   317|    st.markdown("## ⚙️ Experiment Setup")
+   318|
+   319|    wl = st.number_input("Wavelength λ (Å)", 0.5, 3.0, 1.54056, 0.00001, "%.5f",
+   320|                         help="CuKα1 = 1.54056 Å, MoKα1 = 0.70930 Å")
+   321|
+   322|    st.markdown("---")
+   323|    st.markdown("### 📂 Data")
+   324|    data_mode = st.radio("Source", ["Synthetic (preset)", "Upload XY file"], label_visibility="collapsed")
+   325|
+   326|    if data_mode == "Upload XY file":
+   327|        uploaded = st.file_uploader("XY file (2θ  I per line)", type=["xy","dat","txt","csv"])
+   328|        if uploaded:
+   329|            lines = uploaded.read().decode().splitlines()
+   330|            pts = []
+   331|            for ln in lines:
+   332|                ln = ln.strip()
+   333|                if not ln or ln.startswith("#"):
+   334|                    continue
+   335|                parts = ln.split()
+   336|                if len(parts) >= 2:
+   337|                    try:
+   338|                        pts.append((float(parts[0]), float(parts[1])))
+   339|                    except ValueError:
+   340|                        pass
+   341|            if pts:
+   342|                arr = np.array(pts)
+   343|                st.session_state.obs_tt = arr[:, 0]
+   344|                st.session_state.obs_I  = arr[:, 1]
+   345|                st.success(f"Loaded {len(pts)} points")
+   346|    else:
+   347|        preset_key = st.selectbox("Preset material", list(PRESETS.keys()))
+   348|        preset = PRESETS[preset_key]
+   349|
+   350|    st.markdown("---")
+   351|    st.markdown("### 🔷 Unit Cell")
+   352|
+   353|    system_options = ["Cubic","Tetragonal","Orthorhombic","Hexagonal","Monoclinic","Triclinic"]
+   354|    system = st.selectbox("Crystal system",
+   355|                          system_options,
+   356|                          index=system_options.index(preset.get("system","Cubic") if data_mode=="Synthetic (preset)" else "Cubic"))
+   357|
+   358|    c1, c2 = st.columns(2)
+   359|    a = c1.number_input("a (Å)", 0.5, 30.0,
+   360|                         preset.get("a",5.43) if data_mode=="Synthetic (preset)" else 5.43,
+   361|                         0.0001, "%.4f")
+   362|    if system == "Cubic":
+   363|        b = a; c = a
+   364|        c2.markdown(f"**b = c = a**")
+   365|    elif system in ("Tetragonal","Hexagonal"):
+   366|        b = a
+   367|        c = c2.number_input("c (Å)", 0.5, 30.0,
+   368|                              preset.get("c",5.43) if data_mode=="Synthetic (preset)" else 5.43,
+   369|                              0.0001, "%.4f")
+   370|        if system == "Tetragonal":
+   371|            st.markdown("b = a")
+   372|    else:
+   373|        b = c2.number_input("b (Å)", 0.5, 30.0,
+   374|                              preset.get("b",5.43) if data_mode=="Synthetic (preset)" else 5.43,
+   375|                              0.0001, "%.4f")
+   376|        c = c1.number_input("c (Å)", 0.5, 30.0,
+   377|                              preset.get("c",5.43) if data_mode=="Synthetic (preset)" else 5.43,
+   378|                              0.0001, "%.4f")
+   379|
+   380|    if system in ("Monoclinic","Triclinic"):
+   381|        c3, c4, c5 = st.columns(3)
+   382|        al = c3.number_input("α°", 1.0, 179.0,
+   383|                              preset.get("al",90.0) if data_mode=="Synthetic (preset)" else 90.0,
+   384|                              0.01, "%.2f")
+   385|        be = c4.number_input("β°", 1.0, 179.0,
+   386|                              preset.get("be",90.0) if data_mode=="Synthetic (preset)" else 90.0,
+   387|                              0.01, "%.2f")
+   388|        ga = c5.number_input("γ°", 1.0, 179.0,
+   389|                              preset.get("ga",90.0) if data_mode=="Synthetic (preset)" else 90.0,
+   390|                              0.01, "%.2f")
+   391|    elif system == "Hexagonal":
+   392|        al, be, ga = 90.0, 90.0, 120.0
+   393|    else:
+   394|        al = be = ga = 90.0
+   395|
+   396|    sg = st.text_input("Space group", preset.get("sg","P1") if data_mode=="Synthetic (preset)" else "P1")
+   397|
+   398|    st.markdown("---")
+   399|    st.markdown("### 📐 2θ Range & Grid")
+   400|    c1, c2 = st.columns(2)
+   401|    tt_min = c1.number_input("Min 2θ (°)", 1.0, 170.0, 10.0, 0.5)
+   402|    tt_max = c2.number_input("Max 2θ (°)", 10.0, 170.0, 100.0, 0.5)
+   403|    n_pts  = st.slider("Grid points", 500, 5000, 2000, 100)
+   404|
+   405|    st.markdown("---")
+   406|    st.markdown("### 📊 Profile Parameters")
+   407|    U     = st.number_input("U (Caglioti)",  0.0,  5.0,   0.010, 0.001, "%.4f")
+   408|    V     = st.number_input("V (Caglioti)", -1.0,  0.0,  -0.001, 0.001, "%.4f")
+   409|    W     = st.number_input("W (Caglioti)",  1e-4, 5.0,   0.005, 0.001, "%.4f")
+   410|    eta0  = st.number_input("η₀ (Lorentzian frac.)", 0.0, 1.0, 0.3, 0.01)
+   411|    scale = st.number_input("Scale factor", 0.001, 1e9, 1000.0, 100.0)
+   412|
+   413|    st.markdown("---")
+   414|    st.markdown("### 🌐 Background")
+   415|    n_bg = st.slider("Chebyshev polynomial terms", 2, 8, 5)
+   416|
+   417|    st.markdown("---")
+   418|    if st.button("🔄 Generate Reflections & Data", type="primary", use_container_width=True):
+   419|        refs = gen_reflections(a, b, c, al, be, ga, system, sg, wl, tt_min, tt_max)
+   420|        st.session_state.refs = refs
+   421|        st.session_state.lb_result = None
+   422|        st.session_state.rv_result = None
+   423|
+   424|        # Build base profile params
+   425|        pr0 = dict(U=U, V=V, W=W, eta0=eta0, scale=scale, wl=wl, system=system)
+   426|        bg0 = np.zeros(n_bg); bg0[0] = 80.0; bg0[1] = -20.0
+   427|
+   428|        tt_arr = np.linspace(tt_min, tt_max, n_pts)
+   429|
+   430|        if data_mode == "Synthetic (preset)":
+   431|            # Use preset atoms
+   432|            atoms_pr = PRESETS[preset_key].get("atoms", [])
+   433|            if atoms_pr:
+   434|                pat, _ = calc_pattern(tt_arr, refs, pr0, bg0,
+   435|                                       atoms=atoms_pr, mode="rietveld")
+   436|            else:
+   437|                pat, _ = calc_pattern(tt_arr, refs, pr0, bg0, mode="lebail")
+   438|            noise = np.random.default_rng(42).normal(
+   439|                0, np.sqrt(np.abs(pat)+1)*0.04)
+   440|            st.session_state.obs_tt = tt_arr
+   441|            st.session_state.obs_I  = np.maximum(pat + noise, 0)
+   442|        elif st.session_state.obs_tt is None:
+   443|            st.warning("Upload a data file first, or use Synthetic mode.")
+   444|
+   445|        st.success(f"✅ {len(refs)} reflections generated")
+   446|
+   447|# ─────────────────────────────────────────────────────────────────────────────
+   448|# MAIN PANEL
+   449|# ─────────────────────────────────────────────────────────────────────────────
+   450|
+   451|st.title("🔬 Diffraction Analyser — Full Profile Refinement")
+   452|
+   453|# Convenience references
+   454|refs   = st.session_state.refs
+   455|obs_tt = st.session_state.obs_tt
+   456|obs_I  = st.session_state.obs_I
+   457|have_data = obs_tt is not None and obs_I is not None and refs is not None
+   458|
+   459|def bragg_ticks(refs, tt_min, tt_max, y0, dy=-0.04, max_ticks=300):
+   460|    """Return plotly shapes + trace for tick marks."""
+   461|    shapes, xs, ys = [], [], []
+   462|    for ref in refs[:max_ticks]:
+   463|        tt_pk = ref[4]
+   464|        if tt_min <= tt_pk <= tt_max:
+   465|            xs += [tt_pk, tt_pk, None]
+   466|            ys += [y0, y0+dy, None]
+   467|    return xs, ys
+   468|
+   469|# ─── TABS ───────────────────────────────────────────────────────────────────
+   470|tab_data, tab_lb, tab_rv, tab_results = st.tabs(
+   471|    ["📈 Pattern", "⚗️ Le Bail Fit", "🔬 Rietveld Fit", "📋 Results"])
+   472|
+   473|# ════════════════════════════════════════════════════════════════════════════
+   474|# TAB 1 — PATTERN VIEW
+   475|# ════════════════════════════════════════════════════════════════════════════
+   476|with tab_data:
+   477|    if not have_data:
+   478|        st.info("👈 Configure the sidebar and click **Generate Reflections & Data** to start.")
+   479|    else:
+   480|        ymax = obs_I.max()
+   481|        tick_x, tick_y = bragg_ticks(refs, obs_tt[0], obs_tt[-1],
+   482|                                      y0=ymax, dy=-ymax*0.04)
+   483|        fig = go.Figure()
+   484|        fig.add_trace(go.Scatter(x=obs_tt, y=obs_I, mode="lines",
+   485|                                  name="Observed", line=dict(color="#1f77b4", width=1.2)))
+   486|        if tick_x:
+   487|            fig.add_trace(go.Scatter(x=tick_x, y=tick_y, mode="lines",
+   488|                                      name="Bragg positions",
+   489|                                      line=dict(color="red", width=1), showlegend=True,
+   490|                                      hoverinfo="skip"))
+   491|        fig.update_layout(
+   492|            xaxis_title="2θ (°)", yaxis_title="Intensity (counts)",
+   493|            template="plotly_white", height=480,
+   494|            title=f"Observed Pattern — {len(refs)} reflections  |  λ = {wl:.5f} Å",
+   495|            legend=dict(x=0.75, y=0.95))
+   496|        st.plotly_chart(fig, use_container_width=True)
+   497|
+   498|        col1, col2, col3 = st.columns(3)
+   499|        col1.metric("Data points",     f"{len(obs_tt):,}")
+   500|        col2.metric("Reflections",     f"{len(refs)}")
+   501|
